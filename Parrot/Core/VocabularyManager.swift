@@ -1,0 +1,153 @@
+import Foundation
+
+/// Manages a list of vocabulary replacement entries.
+///
+/// Replacements are applied case-insensitively with case-preserving output:
+/// if the matched text is all-uppercase the replacement is uppercased, and if
+/// the first character is uppercase the replacement is capitalized.
+///
+/// Persists entries to a JSON file in Application Support.
+@Observable
+final class VocabularyManager {
+
+    // MARK: - State
+
+    private(set) var entries: [VocabularyEntry] = []
+
+    // MARK: - Persistence
+
+    private static var storageURL: URL {
+        let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        ).first!
+        let dir = appSupport.appendingPathComponent("Parrot", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("vocabulary.json")
+    }
+
+    // MARK: - Initialization
+
+    init() {
+        load()
+    }
+
+    // MARK: - CRUD
+
+    func addEntry(original: String, replacement: String) {
+        let entry = VocabularyEntry(original: original, replacement: replacement)
+        entries.append(entry)
+        save()
+    }
+
+    func updateEntry(_ entry: VocabularyEntry) {
+        guard let index = entries.firstIndex(where: { $0.id == entry.id }) else { return }
+        entries[index] = entry
+        save()
+    }
+
+    func removeEntry(id: UUID) {
+        entries.removeAll { $0.id == id }
+        save()
+    }
+
+    func removeEntries(at offsets: IndexSet) {
+        entries.remove(atOffsets: offsets)
+        save()
+    }
+
+    func moveEntries(from source: IndexSet, to destination: Int) {
+        entries.move(fromOffsets: source, toOffset: destination)
+        save()
+    }
+
+    // MARK: - Replacement Engine
+
+    /// Applies all enabled vocabulary entries to the given text.
+    ///
+    /// Matching is case-insensitive. The replacement preserves the case of the
+    /// matched text:
+    /// - All-uppercase match -> all-uppercase replacement
+    /// - Title-case match -> title-case replacement
+    /// - Otherwise -> replacement as-is
+    func apply(to text: String) -> String {
+        var result = text
+
+        for entry in entries where entry.isEnabled && !entry.original.isEmpty {
+            result = replacePreservingCase(
+                in: result,
+                target: entry.original,
+                replacement: entry.replacement
+            )
+        }
+
+        return result
+    }
+
+    // MARK: - Private Helpers
+
+    private func replacePreservingCase(
+        in text: String,
+        target: String,
+        replacement: String
+    ) -> String {
+        var output = ""
+        var searchRange = text.startIndex..<text.endIndex
+
+        while let range = text.range(
+            of: target,
+            options: .caseInsensitive,
+            range: searchRange
+        ) {
+            output += text[searchRange.lowerBound..<range.lowerBound]
+
+            let matched = String(text[range])
+            let adjusted = adjustCase(of: replacement, toMatch: matched)
+            output += adjusted
+
+            searchRange = range.upperBound..<text.endIndex
+        }
+
+        output += text[searchRange]
+        return output
+    }
+
+    private func adjustCase(of replacement: String, toMatch matched: String) -> String {
+        guard !matched.isEmpty, !replacement.isEmpty else { return replacement }
+
+        let isAllUppercase = matched == matched.uppercased() && matched != matched.lowercased()
+        if isAllUppercase {
+            return replacement.uppercased()
+        }
+
+        let firstChar = matched[matched.startIndex]
+        if firstChar.isUppercase {
+            return replacement.prefix(1).uppercased() + replacement.dropFirst()
+        }
+
+        return replacement
+    }
+
+    // MARK: - Persistence Helpers
+
+    private func save() {
+        do {
+            let data = try JSONEncoder().encode(entries)
+            try data.write(to: Self.storageURL, options: .atomic)
+        } catch {
+            // Non-fatal: entries remain in memory.
+        }
+    }
+
+    private func load() {
+        let url = Self.storageURL
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+
+        do {
+            let data = try Data(contentsOf: url)
+            entries = try JSONDecoder().decode([VocabularyEntry].self, from: data)
+        } catch {
+            // Non-fatal: start with empty entries.
+            entries = []
+        }
+    }
+}
