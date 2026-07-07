@@ -25,7 +25,10 @@ let package = Package(
         .testTarget(
             name: "ParrotTests",
             dependencies: ["Parrot"],
-            path: "ParrotTests"
+            path: "ParrotTests",
+            resources: [
+                .copy("Resources"),
+            ]
         ),
     ]
 )

@@ -200,6 +200,7 @@ struct ModeEditSheet: View {
     @State private var description: String = ""
     @State private var voiceModelVersion: String = "v3"
     @State private var language: String = "auto"
+    @State private var refinementPrompt: String = ""
 
     private let availableLanguages = [
         "English", "Spanish", "French", "German", "Italian",
@@ -245,6 +246,16 @@ struct ModeEditSheet: View {
                         }
                     }
                 }
+
+                Section("AI Refinement") {
+                    TextEditor(text: $refinementPrompt)
+                        .font(.callout)
+                        .frame(minHeight: 60)
+
+                    Text("Directive used when refining transcripts in this mode, e.g. \"Format as a professional email\". Leave empty for the default cleanup directive.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             .formStyle(.grouped)
 
@@ -259,13 +270,15 @@ struct ModeEditSheet: View {
                 .keyboardShortcut(.cancelAction)
 
                 Button(mode == nil ? "Add" : "Save") {
+                    let trimmedPrompt = refinementPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
                     let savedMode = Mode(
                         id: mode?.id ?? UUID(),
                         name: name,
                         description: description,
                         voiceModelVersion: voiceModelVersion,
                         language: language,
-                        isDefault: mode?.isDefault ?? false
+                        isDefault: mode?.isDefault ?? false,
+                        refinementPrompt: trimmedPrompt.isEmpty ? nil : trimmedPrompt
                     )
                     onSave(savedMode)
                     dismiss()
@@ -276,13 +289,14 @@ struct ModeEditSheet: View {
             }
             .padding(20)
         }
-        .frame(width: 450, height: 400)
+        .frame(width: 450, height: 540)
         .onAppear {
             if let mode = mode {
                 name = mode.name
                 description = mode.description
                 voiceModelVersion = mode.voiceModelVersion
                 language = mode.language
+                refinementPrompt = mode.refinementPrompt ?? ""
             }
         }
     }

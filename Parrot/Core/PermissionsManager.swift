@@ -58,10 +58,20 @@ final class PermissionsManager {
 
     /// Checks whether Input Monitoring (CGEventTap) is allowed.
     ///
-    /// Uses the modern preflight API on macOS 15+ and falls back to
-    /// attempting a listen-only event tap on older systems.
+    /// **Important:** On macOS 15+, `CGPreflightListenEventAccess()` is
+    /// unreliable — it can return `true` even when the app is NOT in the
+    /// TCC Input Monitoring list. The CGEventTap will be created
+    /// successfully but macOS silently drops events ("deaf tap").
+    ///
+    /// To work around this, we always call `CGRequestListenEventAccess()`
+    /// on first launch (via `ensureInputMonitoringAccess()`) and rely on
+    /// the HotkeyManager self-test to detect deaf taps at runtime.
     func checkInputMonitoringPermission() -> Bool {
         if #available(macOS 15.0, *) {
+            // Note: This API is unreliable on macOS 15+. It may return
+            // true even when the app lacks Input Monitoring permission.
+            // We keep calling it for UI status but do NOT skip the
+            // access request based on its result.
             return CGPreflightListenEventAccess()
         }
         // Fallback: attempt to create a listen-only tap and see if it succeeds.
@@ -79,11 +89,35 @@ final class PermissionsManager {
 
     /// Requests Input Monitoring access. On macOS 15+ this triggers a system
     /// prompt; on older versions it opens System Settings.
-    func requestInputMonitoringAccess() {
+    @discardableResult
+    func requestInputMonitoringAccess() -> Bool {
         if #available(macOS 15.0, *) {
-            CGRequestListenEventAccess()
+            return CGRequestListenEventAccess()
         } else {
             openSystemPreferences(for: .inputMonitoring)
+            return false
+        }
+    }
+
+    /// Ensures Input Monitoring permission is granted. On macOS 15+, this
+    /// **always** calls `CGRequestListenEventAccess()` because the preflight
+    /// API is unreliable. If the app already has the permission, the call
+    /// returns `true` without showing a dialog.
+    func ensureInputMonitoringAccess() {
+        if #available(macOS 15.0, *) {
+            let result = CGRequestListenEventAccess()
+            diagLog("[Parrot:Permissions] CGRequestListenEventAccess() = \(result)")
+            if !result {
+                diagLog("[Parrot:Permissions] Input Monitoring NOT granted — opening System Settings")
+                openSystemPreferences(for: .inputMonitoring)
+            }
+            inputMonitoringGranted = result
+        } else {
+            let ok = checkInputMonitoringPermission()
+            if !ok {
+                openSystemPreferences(for: .inputMonitoring)
+            }
+            inputMonitoringGranted = ok
         }
     }
 

@@ -11,6 +11,9 @@ final class ModeManager {
     private(set) var modes: [Mode] = []
     var selectedMode: Mode
 
+    /// True when no persisted mode file existed at init (first launch).
+    private(set) var isFreshInstall = false
+
     // MARK: - Persistence
 
     private static var storageURL: URL {
@@ -31,6 +34,7 @@ final class ModeManager {
 
         // Ensure there is always at least the default mode.
         if modes.isEmpty {
+            isFreshInstall = true
             modes = [Mode.defaultMode]
             save()
         }
@@ -70,6 +74,19 @@ final class ModeManager {
 
         if selectedMode.id == id {
             selectedMode = modes[0]
+        }
+        save()
+    }
+
+    /// Replaces the whole mode list (used to persist UI-level edits) and
+    /// keeps the selection valid.
+    func replaceAll(_ newModes: [Mode]) {
+        guard !newModes.isEmpty else { return }
+        modes = newModes
+        if let match = newModes.first(where: { $0.id == selectedMode.id }) {
+            selectedMode = match
+        } else {
+            selectedMode = newModes[0]
         }
         save()
     }

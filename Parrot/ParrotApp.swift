@@ -74,7 +74,6 @@ final class ParrotAppDelegate: NSObject, NSApplicationDelegate, ObservableObject
                 .onAppear {
                     appState.setup()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        appState.textEnhancer?.configure(from: appSettings)
                         appState.syncHotkeys(from: appSettings)
                     }
                 }
@@ -112,6 +111,7 @@ struct ParrotApp: App {
         let settings = AppSettings()
         _appState = State(initialValue: state)
         _appSettings = State(initialValue: settings)
+        state.settings = settings
         appDelegate.appState = state
         appDelegate.appSettings = settings
     }

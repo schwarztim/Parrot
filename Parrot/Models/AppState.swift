@@ -127,6 +127,8 @@ final class AppState {
 
     // MARK: - Modes (UI-level)
 
+    /// UI-level mode list. Mirrored into ModeManager for persistence whenever
+    /// a view mutates it.
     var modes: [Mode] = [
         Mode(
             name: "General",
@@ -141,7 +143,9 @@ final class AppState {
             voiceModelVersion: "v3",
             language: "auto"
         ),
-    ]
+    ] {
+        didSet { modeManager?.replaceAll(modes) }
+    }
     var currentMode: Mode?
 
     // MARK: - Vocabulary
@@ -200,7 +204,10 @@ final class AppState {
     private(set) var vocabularyManager: VocabularyManager?
     private(set) var modeManager: ModeManager?
     private(set) var permissionsManager: PermissionsManager?
-    private(set) var textEnhancer: TextEnhancer?
+
+    /// Settings supplying transcription/refinement provider configuration.
+    /// Wired at launch by ParrotApp.
+    var settings: AppSettings?
 
     // MARK: - Initialization
 
@@ -353,16 +360,19 @@ final class AppState {
         // Text inserter
         self.textInserter = TextInserter()
 
-        // Text enhancer (Azure OpenAI)
-        self.textEnhancer = TextEnhancer()
-
         // Vocabulary manager
         let vocab = VocabularyManager()
         self.vocabularyManager = vocab
         self.vocabularyEntries = vocab.entries
 
-        // Mode manager
+        // Mode manager. On first launch, seed the persisted store with the
+        // built-in UI modes; afterwards the persisted list is authoritative.
         let modeManager = ModeManager()
+        if modeManager.isFreshInstall {
+            modeManager.replaceAll(modes)
+        }
+        self.modes = modeManager.modes
+        self.currentMode = modeManager.selectedMode
         self.modeManager = modeManager
 
         // Hotkey manager
@@ -389,8 +399,26 @@ final class AppState {
         if !accessOK {
             diagLog("[Parrot:Setup] Accessibility NOT granted — requesting + opening System Settings")
             permissions.requestAccessibilityAccess()
-            // Also open the Accessibility pane so the user can toggle it.
             permissions.openSystemPreferences(for: .accessibility)
+        }
+
+        // On macOS 15+, CGEventTap requires Input Monitoring (separate from Accessibility).
+        // IMPORTANT: Always call ensureInputMonitoringAccess() regardless of what
+        // CGPreflightListenEventAccess() returns, because the preflight API is
+        // unreliable on macOS 15+ (returns true even when permission is NOT granted,
+        // resulting in a "deaf" CGEventTap that silently drops all events).
+        if #available(macOS 15.0, *) {
+            diagLog("[Parrot:Setup] Input Monitoring: requesting via ensureInputMonitoringAccess()")
+            permissions.ensureInputMonitoringAccess()
+            diagLog("[Parrot:Setup] Input Monitoring granted: \(permissions.inputMonitoringGranted)")
+        }
+
+        // Wire up the deaf-tap callback so we can warn the user if the
+        // CGEventTap was created but isn't receiving events.
+        hotkey.onTapDeaf = { [weak self] in
+            diagLog("[Parrot:Setup] CGEventTap is DEAF — Input Monitoring permission missing")
+            diagLog("[Parrot:Setup] Opening System Settings > Input Monitoring")
+            self?.permissionsManager?.openSystemPreferences(for: .inputMonitoring)
         }
 
         diagLog("[Parrot:Setup] Starting HotkeyManager")
@@ -415,10 +443,19 @@ final class AppState {
     func startRecording() {
         diagLog("[Parrot:AppState] startRecording called (status=\(currentStatus), recorder=\(audioRecorder != nil), modelReady=\(isModelReady))")
 
-        guard currentStatus == .idle else {
-            diagLog("[Parrot:AppState] startRecording BLOCKED: status is \(currentStatus), not .idle")
+        // Only block if already recording or processing.
+        // Allow start during model download — transcription will fail gracefully
+        // with a clear error if the model isn't ready when recording stops.
+        switch currentStatus {
+        case .recording, .processing:
+            diagLog("[Parrot:AppState] startRecording BLOCKED: status is \(currentStatus)")
             return
+        case .error:
+            errorMessage = nil
+        case .idle, .downloading:
+            break
         }
+
         guard let recorder = audioRecorder else {
             diagLog("[Parrot:AppState] startRecording BLOCKED: audioRecorder is nil")
             return
@@ -474,8 +511,8 @@ final class AppState {
             return
         }
 
-        // Minimum ~0.5s of audio needed for reliable transcription.
-        guard durationSec >= 0.5 else {
+        // Minimum ~0.3s of audio needed for reliable transcription.
+        guard durationSec >= 0.3 else {
             diagLog("[Parrot:AppState] Recording too short (\(String(format: "%.1f", durationSec))s) — skipping transcription")
             recordingState = .idle
             currentStatus = .idle
@@ -485,26 +522,33 @@ final class AppState {
 
         currentStatus = .processing
 
+        let forceRefinement = isEnhanceMode
+
         Task { [weak self] in
             guard let self else { return }
 
             do {
-                guard let engine = self.transcriptionEngine else {
-                    throw TranscriptionError.engineNotReady
-                }
-                var text = try await engine.transcribe(samples)
+                var text = try await self.transcribe(samples)
 
                 // Apply vocabulary replacements.
                 if let vocab = self.vocabularyManager {
                     text = vocab.apply(to: text)
                 }
 
-                // If enhance mode is active, polish text via Azure OpenAI.
-                if self.isEnhanceMode, let enhancer = self.textEnhancer {
+                // Refine via the configured LLM provider. Any failure falls
+                // back to the raw transcript; dictation is never lost.
+                if let settings = self.settings, settings.refinementEnabled || forceRefinement {
                     do {
-                        text = try await enhancer.enhance(text)
+                        text = try await RefinementService.refine(
+                            text,
+                            modePrompt: self.currentMode?.refinementPrompt,
+                            settings: settings
+                        )
                     } catch {
-                        // Fall back to unenhanced text on failure.
+                        diagLog("[Parrot:AppState] Refinement FAILED, pasting raw transcript: \(error)")
+                        await self.showTransientError(
+                            "Refinement failed, pasted raw transcript. \(error.localizedDescription)"
+                        )
                     }
                 }
 
@@ -519,7 +563,8 @@ final class AppState {
                     self.isEnhanceMode = false
                 }
 
-                // Insert text via pasteboard simulation.
+                // Copy to the pasteboard and paste; the text stays on the
+                // clipboard afterwards.
                 await TextInserter.insertText(text)
                 diagLog("[Parrot:AppState] Text inserted via Cmd+V")
 
@@ -532,14 +577,85 @@ final class AppState {
                     self.recordingState = .idle
                     self.currentStatus = .error("Transcription failed: \(error.localizedDescription)")
                     self.errorMessage = error.localizedDescription
+                    self.isEnhanceMode = false
                     self.startInputMonitoring()
                 }
             }
         }
     }
 
-    /// Begins recording in enhance mode — the transcription will be polished
-    /// by Azure OpenAI before being pasted.
+    // MARK: - Transcription Provider Selection
+
+    /// Transcribes samples with the provider selected in settings.
+    ///
+    /// Cloud failures (or missing cloud configuration) fall back to the local
+    /// Parakeet engine when it is ready, with a non-blocking error overlay,
+    /// so dictation is never lost.
+    private func transcribe(_ samples: [Float]) async throws -> String {
+        guard let engine = transcriptionEngine else {
+            throw TranscriptionError.engineNotReady
+        }
+
+        let choice = settings?.transcriptionProvider ?? .parakeet
+        guard choice != .parakeet else {
+            return try await engine.transcribe(samples)
+        }
+
+        guard let cloud = cloudTranscriber(for: choice) else {
+            await showTransientError(
+                "\(choice.displayName) is not configured, used on-device Parakeet instead."
+            )
+            return try await engine.transcribe(samples)
+        }
+
+        do {
+            return try await cloud.transcribe(samples)
+        } catch {
+            diagLog("[Parrot:AppState] Cloud transcription FAILED: \(error)")
+            guard isModelReady else { throw error }
+            await showTransientError(
+                "\(choice.displayName) failed, used on-device Parakeet instead. \(error.localizedDescription)"
+            )
+            return try await engine.transcribe(samples)
+        }
+    }
+
+    /// Builds the cloud transcriber for the given choice, or nil when its
+    /// settings are incomplete.
+    private func cloudTranscriber(for choice: TranscriptionProviderChoice) -> TranscriptionProvider? {
+        guard let settings else { return nil }
+        switch choice {
+        case .parakeet:
+            return nil
+        case .openAI:
+            guard !settings.openAIKey.isEmpty, !settings.openAITranscriptionModel.isEmpty else { return nil }
+            return OpenAITranscriber(apiKey: settings.openAIKey, model: settings.openAITranscriptionModel)
+        case .azureWhisper:
+            guard !settings.azureOpenAIEndpoint.isEmpty,
+                  !settings.azureOpenAIKey.isEmpty,
+                  !settings.azureWhisperDeployment.isEmpty
+            else { return nil }
+            return AzureWhisperTranscriber(
+                endpoint: settings.azureOpenAIEndpoint,
+                apiKey: settings.azureOpenAIKey,
+                deployment: settings.azureWhisperDeployment,
+                apiVersion: settings.azureOpenAIAPIVersion
+            )
+        }
+    }
+
+    // MARK: - Transient Errors
+
+    /// Shows a non-blocking floating error toast and records the message.
+    /// Does not change `currentStatus`; the pipeline continues normally.
+    @MainActor
+    private func showTransientError(_ message: String) {
+        errorMessage = message
+        ErrorToastPanel.show(message)
+    }
+
+    /// Begins recording with refinement forced on for this dictation, even if
+    /// the global refinement toggle is off.
     func startEnhanceRecording() {
         isEnhanceMode = true
         startRecording()

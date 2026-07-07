@@ -7,6 +7,10 @@ struct Mode: Codable, Identifiable, Hashable {
     var voiceModelVersion: String
     var language: String
     var isDefault: Bool
+    /// Per-mode refinement directive. Nil or empty falls back to
+    /// `RefinementService.defaultDirective`. Optional so modes saved before
+    /// this field existed still decode.
+    var refinementPrompt: String?
 
     init(
         id: UUID = UUID(),
@@ -14,7 +18,8 @@ struct Mode: Codable, Identifiable, Hashable {
         description: String = "",
         voiceModelVersion: String,
         language: String,
-        isDefault: Bool = false
+        isDefault: Bool = false,
+        refinementPrompt: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -22,6 +27,7 @@ struct Mode: Codable, Identifiable, Hashable {
         self.voiceModelVersion = voiceModelVersion
         self.language = language
         self.isDefault = isDefault
+        self.refinementPrompt = refinementPrompt
     }
 
     /// Creates the built-in default mode.
