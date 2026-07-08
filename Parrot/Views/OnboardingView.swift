@@ -5,6 +5,7 @@ struct OnboardingView: View {
     @Environment(AppSettings.self) private var appSettings
     @State private var currentStep: OnboardingStep = .welcome
     @State private var inputMonitoringTimer: Timer?
+    @State private var accessibilityTimer: Timer?
 
     /// Called when the user completes onboarding. The host (AppDelegate)
     /// uses this to close the onboarding window and show the main window.
@@ -30,6 +31,8 @@ struct OnboardingView: View {
                         microphoneStep
                     case .inputMonitoring:
                         inputMonitoringStep
+                    case .accessibility:
+                        accessibilityStep
                     case .modelDownload:
                         modelDownloadStep
                     }
@@ -58,6 +61,8 @@ struct OnboardingView: View {
         .onDisappear {
             inputMonitoringTimer?.invalidate()
             inputMonitoringTimer = nil
+            accessibilityTimer?.invalidate()
+            accessibilityTimer = nil
         }
     }
 
@@ -120,6 +125,8 @@ struct OnboardingView: View {
             return appState.microphonePermissionGranted
         case .inputMonitoring:
             return appState.inputMonitoringPermissionGranted
+        case .accessibility:
+            return appState.accessibilityPermissionGranted
         case .modelDownload:
             return appState.isModelReady
         }
@@ -129,7 +136,8 @@ struct OnboardingView: View {
         switch step {
         case .welcome: return "Welcome"
         case .microphonePermission: return "Microphone"
-        case .inputMonitoring: return "Input"
+        case .inputMonitoring: return "Hotkey"
+        case .accessibility: return "Paste"
         case .modelDownload: return "Model"
         }
     }
@@ -275,7 +283,57 @@ struct OnboardingView: View {
         }
     }
 
-    // MARK: - Step 4: Model Download
+    // MARK: - Step 4: Accessibility (Auto-paste)
+
+    private var accessibilityStep: some View {
+        VStack(spacing: 24) {
+            permissionIcon(
+                systemName: "doc.on.clipboard",
+                color: .orange,
+                granted: appState.accessibilityPermissionGranted
+            )
+
+            VStack(spacing: 8) {
+                Text("Auto-paste")
+                    .font(.title.weight(.bold))
+
+                Text(
+                    "After transcribing, Parrot presses Cmd+V for you so text lands at your cursor. macOS calls this Accessibility access."
+                )
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 360)
+            }
+
+            if appState.accessibilityPermissionGranted {
+                Label("Auto-paste enabled", systemImage: "checkmark.circle.fill")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.green)
+            } else {
+                VStack(spacing: 12) {
+                    Button {
+                        requestAccessibility()
+                    } label: {
+                        Text("Grant Access")
+                            .frame(width: 160)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+
+                    Text(
+                        "Enable Parrot in Privacy & Security > Accessibility. Used for one thing: pasting your dictation. Skip it and Parrot copies to your clipboard instead."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 340)
+                }
+            }
+        }
+    }
+
+    // MARK: - Step 5: Model Download
 
     private var modelDownloadStep: some View {
         VStack(spacing: 24) {
@@ -422,6 +480,9 @@ struct OnboardingView: View {
             return appState.microphonePermissionGranted
         case .inputMonitoring:
             return appState.inputMonitoringPermissionGranted
+        case .accessibility:
+            // Skippable: clipboard-only is a valid degraded mode.
+            return true
         case .modelDownload:
             return appState.isModelReady
         }
@@ -483,6 +544,36 @@ struct OnboardingView: View {
                     appState.inputMonitoringPermissionGranted = true
                     inputMonitoringTimer?.invalidate()
                     inputMonitoringTimer = nil
+                }
+            }
+        }
+    }
+
+    private func requestAccessibility() {
+        guard let permissions = appState.permissionsManager else {
+            if let url = URL(
+                string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+            ) {
+                NSWorkspace.shared.open(url)
+            }
+            return
+        }
+        // Show the AX trust prompt and deep-link straight to the pane; AX trust
+        // has no completion callback, so poll until it flips.
+        permissions.requestAccessibilityAccess()
+        permissions.openSystemPreferences(for: .accessibility)
+        startAccessibilityPolling()
+    }
+
+    private func startAccessibilityPolling() {
+        accessibilityTimer?.invalidate()
+        accessibilityTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            Task { @MainActor in
+                guard let permissions = appState.permissionsManager else { return }
+                if permissions.checkAccessibilityPermission() {
+                    appState.accessibilityPermissionGranted = true
+                    accessibilityTimer?.invalidate()
+                    accessibilityTimer = nil
                 }
             }
         }

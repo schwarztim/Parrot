@@ -43,7 +43,8 @@ enum OnboardingStep: Int, CaseIterable {
     case welcome = 0
     case microphonePermission = 1
     case inputMonitoring = 2
-    case modelDownload = 3
+    case accessibility = 3
+    case modelDownload = 4
 }
 
 // MARK: - AppStatus
@@ -192,6 +193,7 @@ final class AppState {
     var currentOnboardingStep: OnboardingStep = .welcome
     var microphonePermissionGranted: Bool = false
     var inputMonitoringPermissionGranted: Bool = false
+    var accessibilityPermissionGranted: Bool = false
     var isDownloadingModel: Bool = false
     var modelDownloadProgress: Double = 0.0
 
@@ -247,6 +249,7 @@ final class AppState {
             await permissions.refreshPermissions()
             microphonePermissionGranted = permissions.microphoneGranted
             inputMonitoringPermissionGranted = permissions.inputMonitoringGranted
+            accessibilityPermissionGranted = permissions.accessibilityGranted
             if permissions.microphoneGranted {
                 microphoneStatus = .connected
             }
@@ -266,8 +269,16 @@ final class AppState {
         }
     }
 
+    /// Guards against running full subsystem initialization more than once.
+    /// `setup()` is invoked both from the onboarding model step and from the
+    /// main window's onAppear; without this guard subsystems init twice.
+    private var didSetup = false
+
     /// Async implementation of subsystem initialization.
     func setupAsync() async {
+        guard !didSetup else { return }
+        didSetup = true
+
         // Permissions
         let permissions = PermissionsManager()
         self.permissionsManager = permissions
@@ -278,6 +289,7 @@ final class AppState {
 
         microphonePermissionGranted = permissions.microphoneGranted
         inputMonitoringPermissionGranted = permissions.inputMonitoringGranted
+        accessibilityPermissionGranted = permissions.accessibilityGranted
 
         // Don't use AVCaptureDevice.requestAccess — it hangs for self-signed apps.
         // Instead, directly try AVAudioEngine which triggers the mic prompt via the
@@ -391,16 +403,13 @@ final class AppState {
         }
         self.hotkeyManager = hotkey
 
-        // Always re-check and request Accessibility on every launch.
-        // Moving the app binary (e.g. ~/Applications → /Applications) can
-        // invalidate the TCC entry even with a stable signing identity.
+        // Re-check Accessibility for status only. The onboarding Accessibility
+        // step owns requesting it; the pipeline must never ambush the user by
+        // opening System Settings on its own. Paste degrades gracefully to
+        // clipboard-only when this is missing (see TextInserter).
         let accessOK = permissions.checkAccessibilityPermission()
+        accessibilityPermissionGranted = accessOK
         diagLog("[Parrot:Setup] Accessibility check: \(accessOK)")
-        if !accessOK {
-            diagLog("[Parrot:Setup] Accessibility NOT granted — requesting + opening System Settings")
-            permissions.requestAccessibilityAccess()
-            permissions.openSystemPreferences(for: .accessibility)
-        }
 
         // On macOS 15+, CGEventTap requires Input Monitoring (separate from Accessibility).
         // IMPORTANT: Always call ensureInputMonitoringAccess() regardless of what
@@ -564,9 +573,15 @@ final class AppState {
                 }
 
                 // Copy to the pasteboard and paste; the text stays on the
-                // clipboard afterwards.
-                await TextInserter.insertText(text)
-                diagLog("[Parrot:AppState] Text inserted via Cmd+V")
+                // clipboard afterwards. If Accessibility is missing the paste
+                // is skipped and the user is told, never a silent failure.
+                let pasted = await TextInserter.insertText(text)
+                diagLog("[Parrot:AppState] Text inserted, pasted=\(pasted)")
+                if !pasted {
+                    await self.showTransientError(
+                        "Copied to clipboard. Grant Accessibility to auto-paste (press Cmd+V to paste now)."
+                    )
+                }
 
                 // Restart level monitoring.
                 await MainActor.run { self.startInputMonitoring() }

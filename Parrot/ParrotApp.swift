@@ -150,10 +150,14 @@ private struct MenuBarContentView: View {
 
         Divider()
 
-        // Open main window
+        // Open main window (or resume onboarding if it isn't finished).
         Button("Open Parrot...") {
             if let delegate = NSApplication.shared.delegate as? ParrotAppDelegate {
-                delegate.showMainWindow()
+                if appSettings.hasCompletedOnboarding {
+                    delegate.showMainWindow()
+                } else {
+                    delegate.showOnboardingWindow()
+                }
             }
         }
         .keyboardShortcut(",", modifiers: .command)
