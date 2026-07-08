@@ -35,18 +35,45 @@ cd Parrot
 ./build.sh
 ```
 
-`build.sh` builds, assembles `/Applications/Parrot.app`, signs it (self-signed "Parrot Dev Signing" certificate if present, ad-hoc otherwise), and launches it. Grant Microphone, Accessibility, and Input Monitoring permissions when prompted.
+`build.sh` builds, assembles `/Applications/Parrot.app`, signs it (self-signed "Parrot Dev Signing" certificate if present, ad-hoc otherwise), and launches it.
 
-The Parakeet model (~800 MB) downloads on first launch to `~/Library/Application Support/FluidAudio/Models`.
+On first launch a guided onboarding wizard walks through the four grants and a live "try it" dictation: Welcome, Microphone (with a live level meter), Hotkey (hold the key to confirm detection), Auto-paste (Accessibility), Model download, and a Try it scratchpad. The Parakeet model (~800 MB) downloads in the background starting at the Welcome screen, to `~/Library/Application Support/FluidAudio/Models`.
 
 ## Usage
 
-- Hold the hotkey (default: Right Option), speak, release. Text is pasted into the frontmost app and stays on the clipboard.
+- Hold the hotkey (default: Right Option), speak, release. Text is pasted into the frontmost app and stays on the clipboard. If Accessibility is not granted, the text is copied to the clipboard and a notice explains how to enable auto-paste.
 - **Configuration tab**: hotkeys, recording window style, and AI Refinement (enable toggle, provider, endpoint/model/key, Test Connection).
 - **Models tab**: transcription provider (on-device Parakeet, OpenAI, or Azure Whisper).
 - **Modes tab**: per-mode refinement directive (e.g. "Format as a professional email"). Empty uses the default cleanup directive.
 
 API keys are stored in the macOS Keychain, one service per provider (`com.parrot.openai`, `com.parrot.azure-openai`, `com.parrot.anthropic`, `com.parrot.local-server`). They are never written to UserDefaults or logs.
+
+## App Icon
+
+The icon source is `icon/AppIcon.svg` (a parrot glyph on the green-to-teal brand gradient). Regenerate `icon/AppIcon.icns` after editing the SVG:
+
+```bash
+ICONSET=$(mktemp -d)/AppIcon.iconset; mkdir -p "$ICONSET"
+for sz in 16 32 128 256 512; do
+  rsvg-convert -w $sz -h $sz icon/AppIcon.svg -o "$ICONSET/icon_${sz}x${sz}.png"
+  rsvg-convert -w $((sz*2)) -h $((sz*2)) icon/AppIcon.svg -o "$ICONSET/icon_${sz}x${sz}@2x.png"
+done
+iconutil -c icns "$ICONSET" -o icon/AppIcon.icns
+```
+
+`build.sh` copies `icon/AppIcon.icns` into the bundle and sets `CFBundleIconFile`.
+
+## Distribution
+
+Local builds via `build.sh` use a self-signed "Parrot Dev Signing" certificate, which keeps TCC permission grants stable across rebuilds (keep this identity stable; changing it wipes granted permissions). This is fine for running on the build machine but is not distributable: another Mac will see a Gatekeeper "unidentified developer" warning.
+
+To ship Parrot to other machines you need a Developer ID:
+
+1. Sign with a "Developer ID Application" certificate and the hardened runtime (`--options runtime`), signing inside-out (nested content first) rather than with the deprecated `--deep`.
+2. Notarize: `xcrun notarytool submit Parrot.zip --keychain-profile <profile> --wait`.
+3. Staple: `xcrun stapler staple /Applications/Parrot.app`.
+
+Do not instruct users to disable Gatekeeper. For a handful of trusted testers, right-click the app and choose Open once.
 
 ## Project Structure
 

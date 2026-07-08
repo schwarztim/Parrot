@@ -1,0 +1,52 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#34D399"/>
+      <stop offset="1" stop-color="#0D9488"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Squircle background -->
+  <path fill="url(#bg)" d="M512 84
+    C 236 84 84 236 84 512
+    C 84 788 236 940 512 940
+    C 788 940 940 788 940 512
+    C 940 236 788 84 512 84 Z"/>
+  <path fill="url(#sheen)" d="M512 84
+    C 236 84 84 236 84 512
+    C 84 788 236 940 512 940
+    C 788 940 940 788 940 512
+    C 940 236 788 84 512 84 Z"/>
+
+  <!-- Parrot head, white glyph -->
+  <g fill="#ffffff">
+    <!-- crest feather -->
+    <path d="M560 250
+      C 546 196 578 156 640 150
+      C 612 182 616 214 636 246
+      C 612 240 584 242 560 250 Z"/>
+    <!-- head and body -->
+    <path d="M556 268
+      C 660 268 742 350 742 460
+      C 742 556 690 628 606 662
+      C 618 690 620 724 606 758
+      C 560 742 522 712 500 672
+      C 420 660 356 590 356 500
+      C 356 388 446 300 556 268 Z"/>
+    <!-- eye (cut out) -->
+    <circle cx="560" cy="430" r="34" fill="#0D9488"/>
+    <circle cx="560" cy="430" r="16" fill="#ffffff"/>
+  </g>
+
+  <!-- Beak, amber -->
+  <path fill="#FBBF24" d="M356 486
+    C 300 480 260 500 250 540
+    C 286 548 320 542 352 522
+    C 372 556 360 596 330 618
+    C 386 616 428 578 436 526
+    C 414 500 386 488 356 486 Z"/>
+</svg>

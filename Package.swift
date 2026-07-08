@@ -18,6 +18,11 @@ let package = Package(
                 .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts"),
             ],
             path: "Parrot",
+            exclude: [
+                // Consumed by build.sh when assembling the .app, not by SwiftPM.
+                "Info.plist",
+                "Parrot.entitlements",
+            ],
             resources: [
                 .process("Resources"),
             ]

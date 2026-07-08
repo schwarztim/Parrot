@@ -1,9 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-# Parrot — Build, Bundle, Sign, and Launch
+# Parrot: Build, Bundle, Sign, and Launch
 #
-# Installs to ~/Applications/Parrot.app for stable TCC permissions.
+# Installs to /Applications/Parrot.app for stable TCC permissions.
 # Uses a self-signed certificate ("Parrot Dev Signing") for hardened runtime.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -12,6 +12,7 @@ APP_DIR="/Applications/Parrot.app"
 BINARY_NAME="Parrot"
 BUNDLE_ID="com.parrot.dev"
 ENTITLEMENTS="$SCRIPT_DIR/Parrot/Parrot.entitlements"
+APP_ICON="$SCRIPT_DIR/icon/AppIcon.icns"
 
 # Ensure /Applications exists (should always exist)
 mkdir -p "/Applications"
@@ -46,6 +47,11 @@ rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$BUILD_DIR/$BINARY_NAME" "$APP_DIR/Contents/MacOS/$BINARY_NAME"
 
+# App icon
+if [ -f "$APP_ICON" ]; then
+    cp "$APP_ICON" "$APP_DIR/Contents/Resources/AppIcon.icns"
+fi
+
 cat > "$APP_DIR/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -61,6 +67,8 @@ cat > "$APP_DIR/Contents/Info.plist" << PLIST
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>LSUIElement</key>
     <false/>
     <key>NSMicrophoneUsageDescription</key>
@@ -69,13 +77,14 @@ cat > "$APP_DIR/Contents/Info.plist" << PLIST
 </plist>
 PLIST
 
-# Sign
+# Sign. Parrot is a single statically linked binary (no nested frameworks),
+# so --deep (deprecated) is unnecessary; sign the bundle directly.
 echo "Signing..."
 if [ "$IDENTITY" = "-" ]; then
-    codesign --force --deep --sign - --identifier "$BUNDLE_ID" \
+    codesign --force --sign - --identifier "$BUNDLE_ID" \
         --entitlements "$ENTITLEMENTS" "$APP_DIR"
 else
-    codesign --force --deep --sign "$IDENTITY" $SIGN_OPTS \
+    codesign --force --sign "$IDENTITY" $SIGN_OPTS \
         --entitlements "$ENTITLEMENTS" "$APP_DIR"
 fi
 
