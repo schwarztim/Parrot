@@ -116,6 +116,8 @@ private enum SettingsKey {
     static let transcriptionProvider = "parrot.transcriptionProvider"
     static let openAITranscriptionModel = "parrot.openAITranscriptionModel"
     static let azureWhisperDeployment = "parrot.azureWhisperDeployment"
+    static let successfulDictationCount = "parrot.successfulDictationCount"
+    static let refinementNudgeDismissed = "parrot.refinementNudgeDismissed"
     static let recordingWindowStyle = "parrot.recordingWindowStyle"
     static let hotkeyBinding = "parrot.hotkeyBinding"
     static let cancelHotkeyBinding = "parrot.cancelHotkeyBinding"
@@ -197,6 +199,22 @@ final class AppSettings {
 
     var anthropicModel: String = "claude-haiku-4-5" {
         didSet { defaults.set(anthropicModel, forKey: SettingsKey.anthropicModel) }
+    }
+
+    /// Count of successful dictations, used to time the one-time AI Refinement
+    /// discovery nudge (it appears after a handful of dictations).
+    var successfulDictationCount: Int = 0 {
+        didSet { defaults.set(successfulDictationCount, forKey: SettingsKey.successfulDictationCount) }
+    }
+
+    /// True once the user has acted on or dismissed the refinement nudge.
+    var refinementNudgeDismissed: Bool = false {
+        didSet { defaults.set(refinementNudgeDismissed, forKey: SettingsKey.refinementNudgeDismissed) }
+    }
+
+    /// Whether to show the one-time AI Refinement discovery card on Home.
+    var shouldShowRefinementNudge: Bool {
+        !refinementNudgeDismissed && !refinementEnabled && successfulDictationCount >= 5
     }
 
     // MARK: - Transcription Settings
@@ -343,6 +361,8 @@ final class AppSettings {
         }
         openAITranscriptionModel = defaults.string(forKey: SettingsKey.openAITranscriptionModel) ?? "whisper-1"
         azureWhisperDeployment = defaults.string(forKey: SettingsKey.azureWhisperDeployment) ?? ""
+        successfulDictationCount = defaults.integer(forKey: SettingsKey.successfulDictationCount)
+        refinementNudgeDismissed = defaults.bool(forKey: SettingsKey.refinementNudgeDismissed)
 
         // API keys
         openAIKey = KeychainHelper.load(service: Self.openAIKeychainService, account: Self.keychainAccount) ?? ""

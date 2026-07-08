@@ -49,6 +49,12 @@ struct MainWindow: View {
         }
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 700, minHeight: 500)
+        .onChange(of: appState.requestConfigurationTab) { _, requested in
+            if requested {
+                selectedTab = .configuration
+                appState.requestConfigurationTab = false
+            }
+        }
     }
 
     // MARK: - Sidebar

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct HomeView: View {
     @Environment(AppState.self) private var appState
+    @Environment(AppSettings.self) private var appSettings
 
     var body: some View {
         VStack(spacing: 0) {
@@ -10,6 +11,11 @@ struct HomeView: View {
             VStack(spacing: 32) {
                 // App Icon / Status Icon
                 statusIcon
+
+                // One-time AI Refinement discovery nudge.
+                if appSettings.shouldShowRefinementNudge {
+                    refinementNudge
+                }
 
                 // Current Mode
                 currentModeSection
@@ -29,6 +35,56 @@ struct HomeView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.windowBackgroundColor))
+    }
+
+    // MARK: - Refinement Nudge
+
+    private var refinementNudge: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .foregroundStyle(.purple)
+                Text("Polish your dictation")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    appSettings.refinementNudgeDismissed = true
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+
+            Text("Parrot can clean up punctuation and phrasing with a local or cloud AI before pasting. Off by default.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Button("Set up") {
+                    appSettings.refinementNudgeDismissed = true
+                    appState.requestConfigurationTab = true
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button("No thanks") {
+                    appSettings.refinementNudgeDismissed = true
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(Color.purple.opacity(0.3), lineWidth: 1)
+        )
     }
 
     // MARK: - Status Icon
@@ -102,7 +158,7 @@ struct HomeView: View {
 
     private var appStateLabel: String {
         switch appState.recordingState {
-        case .idle: return "Idle -- Ready to record"
+        case .idle: return "Idle. Ready to record."
         case .recording: return "Recording..."
         case .processing: return "Processing audio..."
         }
@@ -205,5 +261,6 @@ struct HomeView: View {
 #Preview {
     HomeView()
         .environment(AppState())
+        .environment(AppSettings())
         .frame(width: 500, height: 500)
 }
