@@ -45,6 +45,7 @@ enum OnboardingStep: Int, CaseIterable {
     case inputMonitoring = 2
     case accessibility = 3
     case modelDownload = 4
+    case tryIt = 5
 }
 
 // MARK: - AppStatus

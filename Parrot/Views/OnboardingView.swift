@@ -6,6 +6,7 @@ struct OnboardingView: View {
     @State private var currentStep: OnboardingStep = .welcome
     @State private var inputMonitoringTimer: Timer?
     @State private var accessibilityTimer: Timer?
+    @State private var scratchpadText: String = ""
 
     /// Called when the user completes onboarding. The host (AppDelegate)
     /// uses this to close the onboarding window and show the main window.
@@ -35,6 +36,8 @@ struct OnboardingView: View {
                         accessibilityStep
                     case .modelDownload:
                         modelDownloadStep
+                    case .tryIt:
+                        tryItStep
                     }
                 }
                 .transition(.asymmetric(
@@ -129,6 +132,8 @@ struct OnboardingView: View {
             return appState.accessibilityPermissionGranted
         case .modelDownload:
             return appState.isModelReady
+        case .tryIt:
+            return !scratchpadText.isEmpty
         }
     }
 
@@ -139,6 +144,7 @@ struct OnboardingView: View {
         case .inputMonitoring: return "Hotkey"
         case .accessibility: return "Paste"
         case .modelDownload: return "Model"
+        case .tryIt: return "Try it"
         }
     }
 
@@ -413,6 +419,82 @@ struct OnboardingView: View {
         }
     }
 
+    // MARK: - Step 6: Try It
+
+    private var tryItStep: some View {
+        VStack(spacing: 20) {
+            VStack(spacing: 8) {
+                Text("Try it out")
+                    .font(.title.weight(.bold))
+
+                Text(tryItInstruction)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 380)
+            }
+
+            // Live recording indicator.
+            HStack(spacing: 8) {
+                switch appState.recordingState {
+                case .recording:
+                    Circle().fill(Color.red).frame(width: 8, height: 8)
+                    Text("Listening...").foregroundStyle(.red)
+                case .processing:
+                    ProgressView().controlSize(.small)
+                    Text("Transcribing...").foregroundStyle(.secondary)
+                case .idle:
+                    Image(systemName: scratchpadText.isEmpty ? "keyboard" : "checkmark.circle.fill")
+                        .foregroundStyle(scratchpadText.isEmpty ? Color.secondary : Color.green)
+                    Text(scratchpadText.isEmpty ? "Ready when you are" : "That works in every app")
+                        .foregroundStyle(scratchpadText.isEmpty ? Color.secondary : Color.green)
+                }
+            }
+            .font(.callout.weight(.medium))
+            .frame(height: 20)
+
+            // Scratchpad the dictation pastes into.
+            TextEditor(text: $scratchpadText)
+                .font(.body)
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .frame(height: 120)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color(.textBackgroundColor))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(Color(.separatorColor), lineWidth: 1)
+                )
+
+            // Diagnose the paste-failure case inline.
+            if !scratchpadText.isEmpty {
+                Label("Nice. You are all set.", systemImage: "sparkles")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            } else if appState.lastTranscription != nil && !appState.accessibilityPermissionGranted {
+                VStack(spacing: 6) {
+                    Text("Transcribed, but could not paste. Your text is on the clipboard (press Cmd+V). Grant Accessibility to enable auto-paste.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 360)
+                    Button("Fix Accessibility") {
+                        currentStep = .accessibility
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                }
+            }
+        }
+    }
+
+    private var tryItInstruction: String {
+        let key = appState.toggleRecordingHotkey.displayName
+        return "Click the box below, then hold \(key) and say: testing Parrot one two three. Let go and watch it appear."
+    }
+
     // MARK: - Permission Icon Helper
 
     private func permissionIcon(systemName: String, color: Color, granted: Bool) -> some View {
@@ -449,7 +531,7 @@ struct OnboardingView: View {
             Spacer()
 
             // Next / Get Started
-            if currentStep == .modelDownload {
+            if currentStep == OnboardingStep.allCases.last {
                 Button {
                     completeOnboarding()
                 } label: {
@@ -485,6 +567,11 @@ struct OnboardingView: View {
             return true
         case .modelDownload:
             return appState.isModelReady
+        case .tryIt:
+            // Never trap the user: Finish is always available here. A
+            // successful dictation is celebrated but not required (paste may
+            // be intentionally skipped in the Accessibility step).
+            return true
         }
     }
 
