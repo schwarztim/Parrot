@@ -21,10 +21,22 @@ final class ParrotAppDelegate: NSObject, NSApplicationDelegate, ObservableObject
 
         DispatchQueue.main.async { [self] in
             if !appSettings.hasCompletedOnboarding {
+                // Regular activation during onboarding so the wizard and the
+                // system TCC prompts reliably take focus.
+                NSApp.setActivationPolicy(.regular)
                 showOnboardingWindow()
             } else {
                 showMainWindow()
             }
+        }
+    }
+
+    /// Re-check permissions whenever Parrot comes to the foreground, so grants
+    /// or revocations made in System Settings (or lost on an app update) are
+    /// reflected in the menu bar health surface.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        Task { @MainActor in
+            appState?.refreshPermissionHealth()
         }
     }
 
@@ -41,6 +53,7 @@ final class ParrotAppDelegate: NSObject, NSApplicationDelegate, ObservableObject
                 self?.onboardingWindow = nil
                 self?.showMainWindow()
             })
+            .onAppear { NSApp.setActivationPolicy(.regular) }
             .environment(appState)
             .environment(appSettings)
 
@@ -66,6 +79,12 @@ final class ParrotAppDelegate: NSObject, NSApplicationDelegate, ObservableObject
         // Close onboarding if open
         onboardingWindow?.close()
         onboardingWindow = nil
+
+        // Once onboarding is done, become a menu-bar accessory (no Dock icon,
+        // out of Cmd-Tab). The settings window still opens on demand.
+        if appSettings.hasCompletedOnboarding {
+            NSApp.setActivationPolicy(.accessory)
+        }
 
         if mainWindow == nil {
             let view = MainWindow()
@@ -133,6 +152,11 @@ struct ParrotApp: App {
         if appState.isRecording || appState.recordingState == .recording {
             return "mic.fill"
         }
+        // Flag missing permissions right in the menu bar glyph, but only once
+        // onboarding is done (during onboarding the wizard owns permissions).
+        if appSettings.hasCompletedOnboarding, !appState.permissionWarnings.isEmpty {
+            return "mic.badge.xmark"
+        }
         return "mic.fill"
     }
 }
@@ -147,6 +171,21 @@ private struct MenuBarContentView: View {
     var body: some View {
         // Status header
         statusSection
+
+        // Permission health rows (only after onboarding, only when unhealthy).
+        if appSettings.hasCompletedOnboarding {
+            let warnings = appState.permissionWarnings
+            if !warnings.isEmpty {
+                Divider()
+                ForEach(warnings) { warning in
+                    Button {
+                        appState.openPermissionSettings(warning.pane)
+                    } label: {
+                        Label(warning.message, systemImage: "exclamationmark.triangle.fill")
+                    }
+                }
+            }
+        }
 
         Divider()
 

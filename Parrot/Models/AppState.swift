@@ -166,6 +166,10 @@ final class AppState {
     // Enhance mode
     var isEnhanceMode: Bool = false
 
+    /// Set by the Home refinement nudge to request the main window switch to
+    /// the Configuration tab. MainWindow observes and resets it.
+    var requestConfigurationTab: Bool = false
+
     // Sound / Level Monitoring
     var inputLevel: Float = 0
     private var levelPollTimer: Timer?
@@ -257,6 +261,133 @@ final class AppState {
         }
     }
 
+    /// Creates the AudioRecorder early (before full setup) so the onboarding
+    /// microphone step can show a live input level meter.
+    func initAudioRecorder() {
+        guard audioRecorder == nil else { return }
+        audioRecorder = AudioRecorder()
+        diagLog("[Parrot:Onboarding] Early AudioRecorder created")
+    }
+
+    /// Guards `beginModelPreparation` against launching more than one download.
+    private var modelPreparationStarted = false
+
+    /// Downloads and loads the Parakeet model in the background, wiring
+    /// progress into the observable state. Idempotent: safe to call from the
+    /// onboarding Welcome step (to start early) and again from setup.
+    func beginModelPreparation() {
+        guard !modelPreparationStarted else { return }
+        modelPreparationStarted = true
+
+        let engine = transcriptionEngine ?? TranscriptionEngine()
+        transcriptionEngine = engine
+
+        diagLog("[Parrot:Model] Starting model download/load task...")
+        Task.detached { [weak self] in
+            do {
+                try await engine.prepareModel { progress in
+                    Task { @MainActor in
+                        self?.currentStatus = .downloading(progress)
+                        self?.modelDownloadProgress = progress
+                        self?.isDownloadingModel = progress < 1.0
+                        if let i = self?.availableModels.firstIndex(where: { $0.name == "Parakeet V3" }) {
+                            self?.availableModels[i].downloadProgress = progress
+                        }
+                    }
+                }
+
+                try await engine.prewarm()
+                diagLog("[Parrot:Model] Pre-warm complete — model READY")
+
+                await MainActor.run {
+                    if case .downloading = self?.currentStatus {
+                        self?.currentStatus = .idle
+                    }
+                    self?.isDownloadingModel = false
+                    if let i = self?.availableModels.firstIndex(where: { $0.name == "Parakeet V3" }) {
+                        self?.availableModels[i].isDownloaded = true
+                        self?.availableModels[i].downloadProgress = 1.0
+                    }
+                }
+            } catch {
+                diagLog("[Parrot:Model] FAILED: \(error)")
+                await MainActor.run {
+                    // Allow a retry after a failed attempt.
+                    self?.modelPreparationStarted = false
+                    self?.currentStatus = .error("Model setup failed: \(error.localizedDescription)")
+                    self?.errorMessage = error.localizedDescription
+                    self?.isDownloadingModel = false
+                }
+            }
+        }
+    }
+
+    // MARK: - Permission Health
+
+    /// A missing permission surfaced in the menu bar health section.
+    struct PermissionWarning: Identifiable {
+        let id: String
+        let message: String
+        let pane: PermissionsManager.PermissionPane
+    }
+
+    /// Permissions that are missing right now, for the menu bar health rows.
+    /// Empty when everything needed is granted (a healthy surface is silent).
+    var permissionWarnings: [PermissionWarning] {
+        var warnings: [PermissionWarning] = []
+        if !microphonePermissionGranted {
+            warnings.append(.init(id: "mic", message: "Microphone off: dictation cannot record", pane: .microphone))
+        }
+        if !inputMonitoringPermissionGranted {
+            warnings.append(.init(id: "input", message: "Hotkey off: grant Input Monitoring", pane: .inputMonitoring))
+        }
+        if !accessibilityPermissionGranted {
+            warnings.append(.init(id: "ax", message: "Auto-paste off: grant Accessibility", pane: .accessibility))
+        }
+        return warnings
+    }
+
+    /// Re-reads permission states from the OS. Call when the app reactivates so
+    /// grants (or revocations) made in System Settings are reflected.
+    @MainActor
+    func refreshPermissionHealth() {
+        guard let permissions = permissionsManager else { return }
+        permissions.refreshPermissions()
+        microphonePermissionGranted = permissions.microphoneGranted
+        inputMonitoringPermissionGranted = permissions.inputMonitoringGranted
+        accessibilityPermissionGranted = permissions.accessibilityGranted
+        microphoneStatus = permissions.microphoneGranted ? .connected : microphoneStatus
+    }
+
+    /// Opens System Settings to the given privacy pane.
+    func openPermissionSettings(_ pane: PermissionsManager.PermissionPane) {
+        permissionsManager?.openSystemPreferences(for: pane)
+    }
+
+    // MARK: - Onboarding Mic Level Meter
+
+    /// Starts mic level monitoring for the onboarding microphone step. Accessing
+    /// the audio input triggers the microphone TCC prompt via the audio
+    /// subsystem, which is reliable on self-signed builds (unlike
+    /// AVCaptureDevice.requestAccess). Also refreshes the granted flag.
+    func startOnboardingMicMonitoring() {
+        initAudioRecorder()
+        startInputMonitoring()
+        Task { @MainActor in
+            guard let permissions = permissionsManager else { return }
+            // Poll briefly for the grant to land after the prompt.
+            for _ in 0..<20 {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                let granted = permissions.checkMicrophonePermission()
+                if granted {
+                    microphonePermissionGranted = true
+                    microphoneStatus = .connected
+                    break
+                }
+            }
+        }
+    }
+
     // MARK: - Setup
 
     /// Initializes all app subsystems. Called once at app launch.
@@ -299,10 +430,11 @@ final class AppState {
         microphonePermissionGranted = permissions.microphoneGranted
         microphoneStatus = permissions.microphoneGranted ? .connected : .permissionNotDetermined
 
-        // Audio recorder
-        let recorder = AudioRecorder()
+        // Audio recorder (reuse the one created early for the onboarding mic
+        // level meter, if present).
+        let recorder = audioRecorder ?? AudioRecorder()
         self.audioRecorder = recorder
-        diagLog("[Parrot:Setup] AudioRecorder created")
+        diagLog("[Parrot:Setup] AudioRecorder ready")
 
         // Populate available input devices.
         let devices = AudioRecorder.availableInputDevices()
@@ -321,54 +453,10 @@ final class AppState {
             }
         }
 
-        // Transcription engine
-        let engine = TranscriptionEngine()
-        self.transcriptionEngine = engine
-
-        // Begin model download / load in the background.
-        diagLog("[Parrot:Setup] Starting model download/load task...")
-        Task.detached { [weak self] in
-            do {
-                diagLog("[Parrot:Model] Calling prepareModel...")
-                try await engine.prepareModel { progress in
-                    diagLog("[Parrot:Model] Download progress: \(Int(progress * 100))%")
-                    Task { @MainActor in
-                        self?.currentStatus = .downloading(progress)
-                        self?.modelDownloadProgress = progress
-                        self?.isDownloadingModel = progress < 1.0
-
-                        if let modelIndex = self?.availableModels.firstIndex(where: { $0.name == "Parakeet V3" }) {
-                            self?.availableModels[modelIndex].downloadProgress = progress
-                        }
-                    }
-                }
-
-                diagLog("[Parrot:Model] Model loaded, pre-warming...")
-                // Pre-warm model with a silent 1-second buffer.
-                try await engine.prewarm()
-                diagLog("[Parrot:Model] Pre-warm complete — model READY")
-
-                await MainActor.run {
-                    if case .downloading = self?.currentStatus {
-                        self?.currentStatus = .idle
-                    }
-                    self?.isDownloadingModel = false
-
-                    if let modelIndex = self?.availableModels.firstIndex(where: { $0.name == "Parakeet V3" }) {
-                        self?.availableModels[modelIndex].isDownloaded = true
-                        self?.availableModels[modelIndex].downloadProgress = 1.0
-                    }
-                    diagLog("[Parrot:Model] Status set to idle, isModelReady=\(self?.isModelReady ?? false)")
-                }
-            } catch {
-                diagLog("[Parrot:Model] FAILED: \(error)")
-                await MainActor.run {
-                    self?.currentStatus = .error("Model setup failed: \(error.localizedDescription)")
-                    self?.errorMessage = error.localizedDescription
-                    self?.isDownloadingModel = false
-                }
-            }
-        }
+        // Begin (or continue) model download. Idempotent: if the download was
+        // already kicked off early from the onboarding Welcome step, this is a
+        // no-op and the model is likely ready or nearly so.
+        beginModelPreparation()
 
         // Text inserter
         self.textInserter = TextInserter()
@@ -571,6 +659,7 @@ final class AppState {
                     self.recordingDuration = 0
                     self.waveformAmplitudes = []
                     self.isEnhanceMode = false
+                    self.settings?.successfulDictationCount += 1
                 }
 
                 // Copy to the pasteboard and paste; the text stays on the
