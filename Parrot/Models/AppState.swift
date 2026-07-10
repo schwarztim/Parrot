@@ -7,20 +7,35 @@ import SwiftUI
 
 // MARK: - Debug Logging
 
-private let diagLogPath = "/tmp/parrot-diag.log"
+/// Diagnostic logging is OFF by default and must never contain transcript
+/// content. Enable with `defaults write com.parrot.dev parrot.debugLogging -bool YES`.
+/// The log lives under Application Support with owner-only permissions, not in
+/// world-readable /tmp.
+private let diagLoggingEnabled = UserDefaults.standard.bool(forKey: "parrot.debugLogging")
+
+private let diagLogURL: URL = {
+    let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Parrot", isDirectory: true)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    return dir.appendingPathComponent("diag.log")
+}()
 
 func diagLog(_ message: String) {
+    guard diagLoggingEnabled else { return }
     let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(message)\n"
-    if let data = line.data(using: .utf8) {
-        if FileManager.default.fileExists(atPath: diagLogPath) {
-            if let handle = FileHandle(forWritingAtPath: diagLogPath) {
-                handle.seekToEndOfFile()
-                handle.write(data)
-                handle.closeFile()
-            }
-        } else {
-            FileManager.default.createFile(atPath: diagLogPath, contents: data)
+    guard let data = line.data(using: .utf8) else { return }
+    let path = diagLogURL.path
+    if FileManager.default.fileExists(atPath: path) {
+        if let handle = try? FileHandle(forWritingTo: diagLogURL) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            handle.closeFile()
         }
+    } else {
+        FileManager.default.createFile(
+            atPath: path, contents: data,
+            attributes: [.posixPermissions: 0o600]
+        )
     }
 }
 
@@ -166,6 +181,14 @@ final class AppState {
     // Enhance mode
     var isEnhanceMode: Bool = false
 
+    /// Destination context captured at hotkey-down, used to make refinement
+    /// aware of where the text is going.
+    var capturedContext: DictationContext?
+
+    /// Short label of the detected destination for the recording overlay,
+    /// e.g. "Mail (Subject)". Nil when destination-aware refinement is off.
+    var destinationLabel: String?
+
     /// Set by the Home refinement nudge to request the main window switch to
     /// the Configuration tab. MainWindow observes and resets it.
     var requestConfigurationTab: Bool = false
@@ -297,7 +320,7 @@ final class AppState {
                 }
 
                 try await engine.prewarm()
-                diagLog("[Parrot:Model] Pre-warm complete — model READY")
+                diagLog("[Parrot:Model] Pre-warm complete, model READY")
 
                 await MainActor.run {
                     if case .downloading = self?.currentStatus {
@@ -559,6 +582,12 @@ final class AppState {
             return
         }
 
+        // Capture the destination NOW, while the target app is still frontmost,
+        // and warm the refinement provider. Both cost zero perceived latency
+        // because they run before the user finishes speaking.
+        captureDestinationContext()
+        if let settings { RefinementService.warmUpIfLocal(settings: settings) }
+
         // Stop level monitoring before recording to avoid engine conflicts.
         stopInputMonitoring()
 
@@ -582,6 +611,20 @@ final class AppState {
             // Restart level monitoring since recording failed.
             startInputMonitoring()
         }
+    }
+
+    /// Captures the frontmost app and focused field for destination-aware
+    /// refinement. No-op (and clears any stale label) when the feature is off.
+    private func captureDestinationContext() {
+        guard settings?.destinationAwareRefinement == true else {
+            capturedContext = nil
+            destinationLabel = nil
+            return
+        }
+        let context = ContextSnapshotter.capture()
+        capturedContext = context
+        destinationLabel = context.displayLabel
+        diagLog("[Parrot:AppState] Destination: \(context.displayLabel ?? "unknown"), secure=\(context.isSecureField)")
     }
 
     /// Stops recording, transcribes captured audio, and inserts the result as text.
@@ -640,6 +683,7 @@ final class AppState {
                         text = try await RefinementService.refine(
                             text,
                             modePrompt: self.currentMode?.refinementPrompt,
+                            context: self.capturedContext,
                             settings: settings
                         )
                     } catch {
@@ -650,7 +694,7 @@ final class AppState {
                     }
                 }
 
-                diagLog("[Parrot:AppState] Transcription result: \(text)")
+                diagLog("[Parrot:AppState] Transcription complete (\(text.count) chars)")
 
                 await MainActor.run {
                     self.lastTranscription = text
@@ -659,6 +703,7 @@ final class AppState {
                     self.recordingDuration = 0
                     self.waveformAmplitudes = []
                     self.isEnhanceMode = false
+                    self.destinationLabel = nil
                     self.settings?.successfulDictationCount += 1
                 }
 

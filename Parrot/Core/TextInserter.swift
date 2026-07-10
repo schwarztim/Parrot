@@ -21,7 +21,12 @@ final class TextInserter {
     static func insertText(_ text: String) async -> Bool {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        // Mark the item concealed so well-behaved clipboard managers (Maccy,
+        // Paste, etc.) do not persist a copy of every dictation.
+        let item = NSPasteboardItem()
+        item.setString(text, forType: .string)
+        item.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+        pasteboard.writeObjects([item])
 
         // Posting a synthetic Cmd+V requires Accessibility. Without it the
         // event goes nowhere, so skip it and leave the text on the clipboard

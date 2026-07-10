@@ -95,6 +95,5 @@ if [ "${1:-}" = "--no-run" ]; then
     echo "Skipping launch (--no-run)"
 else
     echo "Launching..."
-    echo "" > /tmp/parrot-diag.log
     open "$APP_DIR"
 fi
