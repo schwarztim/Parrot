@@ -19,6 +19,7 @@ Two independent layers, each local or cloud:
    - **Azure OpenAI**: deployment URL with `api-key` header (API version `2024-10-21`).
    - **Anthropic Claude**: `https://api.anthropic.com/v1/messages` (`x-api-key`, `anthropic-version: 2023-06-01`); models `claude-haiku-4-5`, `claude-sonnet-5`, `claude-opus-4-8`.
    - Refinement off (the default) pastes the raw transcript, so the app works unconfigured and local-only.
+   - Vocabulary boosting (Vocabulary tab, off by default): biases on-device recognition toward your custom terms so proper nouns and jargon are transcribed correctly, not just find/replaced afterward. Enabling downloads an auxiliary recognizer model (~110M parameters).
    - On any provider error the raw transcript is pasted instead; dictation is never lost.
 
 ## Prerequisites

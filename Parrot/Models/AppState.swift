@@ -323,6 +323,12 @@ final class AppState {
                 try await engine.prewarm()
                 diagLog("[Parrot:Model] Pre-warm complete, model READY")
 
+                // Configure vocabulary boosting once the model is ready.
+                await engine.configureVocabulary(
+                    entries: self?.vocabularyManager?.entries ?? [],
+                    enabled: self?.settings?.vocabularyBoostingEnabled ?? false
+                )
+
                 await MainActor.run {
                     if case .downloading = self?.currentStatus {
                         self?.currentStatus = .idle
@@ -386,6 +392,18 @@ final class AppState {
     /// Opens System Settings to the given privacy pane.
     func openPermissionSettings(_ pane: PermissionsManager.PermissionPane) {
         permissionsManager?.openSystemPreferences(for: pane)
+    }
+
+    /// Reconfigures ASR vocabulary boosting after a vocabulary edit or a toggle
+    /// change. Reads the live UI entries so boosting reflects what the user
+    /// sees. Fire-and-forget; failures are handled inside the engine.
+    func refreshVocabularyBoosting() {
+        guard let engine = transcriptionEngine else { return }
+        let entries = vocabularyEntries
+        let enabled = settings?.vocabularyBoostingEnabled ?? false
+        Task.detached {
+            await engine.configureVocabulary(entries: entries, enabled: enabled)
+        }
     }
 
     // MARK: - Onboarding Mic Level Meter

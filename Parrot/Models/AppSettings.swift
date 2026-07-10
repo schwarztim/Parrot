@@ -122,6 +122,7 @@ private enum SettingsKey {
     static let contextLocalOnly = "parrot.contextLocalOnly"
     static let historyEnabled = "parrot.historyEnabled"
     static let historyRetentionDays = "parrot.historyRetentionDays"
+    static let vocabularyBoostingEnabled = "parrot.vocabularyBoostingEnabled"
     static let recordingWindowStyle = "parrot.recordingWindowStyle"
     static let hotkeyBinding = "parrot.hotkeyBinding"
     static let cancelHotkeyBinding = "parrot.cancelHotkeyBinding"
@@ -242,6 +243,12 @@ final class AppSettings {
     /// Days to keep history. 0 keeps forever.
     var historyRetentionDays: Int = 30 {
         didSet { defaults.set(historyRetentionDays, forKey: SettingsKey.historyRetentionDays) }
+    }
+
+    /// When on, vocabulary terms bias the recognizer at decode time (downloads
+    /// an auxiliary CTC model). Off by default because of the extra download.
+    var vocabularyBoostingEnabled: Bool = false {
+        didSet { defaults.set(vocabularyBoostingEnabled, forKey: SettingsKey.vocabularyBoostingEnabled) }
     }
 
     // MARK: - Transcription Settings
@@ -385,6 +392,7 @@ final class AppSettings {
         contextLocalOnly = defaults.object(forKey: SettingsKey.contextLocalOnly) as? Bool ?? true
         historyEnabled = defaults.object(forKey: SettingsKey.historyEnabled) as? Bool ?? true
         historyRetentionDays = defaults.object(forKey: SettingsKey.historyRetentionDays) as? Int ?? 30
+        vocabularyBoostingEnabled = defaults.bool(forKey: SettingsKey.vocabularyBoostingEnabled)
 
         // API keys
         openAIKey = KeychainHelper.load(service: Self.openAIKeychainService, account: Self.keychainAccount) ?? ""

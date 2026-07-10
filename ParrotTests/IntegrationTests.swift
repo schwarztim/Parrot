@@ -121,6 +121,29 @@ final class ParakeetIntegrationTests: XCTestCase {
         XCTAssertTrue(text.lowercased().contains("test"), "unexpected transcription: \(text)")
     }
 
+    /// Proves the real vocabulary-boosting path: prepare the model, configure
+    /// boosting with a term, and confirm it activated. Downloads the auxiliary
+    /// CTC model (~110M) on first run. Self-skips when Parakeet is not cached.
+    func testVocabularyBoostingConfiguresAgainstRealModels() async throws {
+        let cacheDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("FluidAudio/Models/parakeet-tdt-0.6b-v3-coreml")
+        try XCTSkipUnless(
+            FileManager.default.fileExists(atPath: cacheDir.path),
+            "Parakeet model not cached; run the app once to download it"
+        )
+
+        let engine = TranscriptionEngine()
+        try await engine.prepareModel()
+
+        var entry = VocabularyEntry(original: "git hub", replacement: "GitHub")
+        entry.isEnabled = true
+        await engine.configureVocabulary(entries: [entry], enabled: true)
+        XCTAssertTrue(engine.vocabularyBoostingActive, "boosting did not activate")
+
+        await engine.configureVocabulary(entries: [entry], enabled: false)
+        XCTAssertFalse(engine.vocabularyBoostingActive)
+    }
+
     /// Loads the bundled WAV fixture as 16kHz mono Float32 samples, the same
     /// shape AudioRecorder produces.
     private static func fixtureSamples() throws -> [Float] {
