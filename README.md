@@ -42,6 +42,19 @@ On first launch a guided onboarding wizard walks through the four grants and a l
 ## Usage
 
 - Hold the hotkey (default: Right Option), speak, release. Text is pasted into the frontmost app and stays on the clipboard. If Accessibility is not granted, the text is copied to the clipboard and a notice explains how to enable auto-paste.
+- Recordings are capped at 2 minutes; if the cap is reached a notice appears rather than silently truncating.
+
+### Scripting (`parrot://` URL scheme)
+
+Drive Parrot from Raycast, Alfred, Stream Deck, or the shell:
+
+```bash
+open "parrot://toggle"            # start or stop dictation
+open "parrot://toggle?mode=Email" # switch to the Email mode, then toggle
+open "parrot://start"             # start recording
+open "parrot://stop"              # stop and transcribe
+open "parrot://cancel"            # discard the current recording
+```
 - **Configuration tab**: hotkeys, recording window style, and AI Refinement (enable toggle, provider, endpoint/model/key, Test Connection).
 - **Models tab**: transcription provider (on-device Parakeet, OpenAI, or Azure Whisper).
 - **Modes tab**: per-mode refinement directive (e.g. "Format as a professional email"). Empty uses the default cleanup directive.

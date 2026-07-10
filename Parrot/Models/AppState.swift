@@ -663,6 +663,14 @@ final class AppState {
 
         currentStatus = .processing
 
+        // Warn if the recording hit the length cap and audio was dropped,
+        // rather than silently truncating.
+        if recorder.didReachCapacity {
+            Task { @MainActor in
+                self.showTransientError("Recording reached the 2 minute limit; the end may be cut off.")
+            }
+        }
+
         let forceRefinement = isEnhanceMode
 
         Task { [weak self] in

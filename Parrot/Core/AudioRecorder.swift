@@ -25,9 +25,14 @@ final class AudioRecorder {
     private let monitorEngine = AVAudioEngine()
     private var samples: [Float] = []
     private let targetSampleRate: Double = 16_000
-    private let maxDuration: TimeInterval = 60 // 60 seconds maximum
-    private let maxSampleCount = 960_000 // 16_000 * 60
+    private let maxDuration: TimeInterval = 120 // 2 minutes maximum
+    private let maxSampleCount = 1_920_000 // 16_000 * 120
     private var isCapturing = false
+
+    /// True when the last recording hit the capacity cap and audio past it was
+    /// dropped. Read after `stopRecording` to warn the user instead of silently
+    /// truncating.
+    private(set) var didReachCapacity = false
 
     private let bufferLock = NSLock()
 
@@ -50,6 +55,7 @@ final class AudioRecorder {
         bufferLock.lock()
         samples.removeAll(keepingCapacity: true)
         currentInputLevel = 0
+        didReachCapacity = false
         bufferLock.unlock()
 
         let inputNode = engine.inputNode
@@ -290,6 +296,11 @@ final class AudioRecorder {
         if remaining > 0 {
             let toAppend = min(outputSamples.count, remaining)
             samples.append(contentsOf: outputSamples.prefix(toAppend))
+            if toAppend < outputSamples.count {
+                didReachCapacity = true
+            }
+        } else {
+            didReachCapacity = true
         }
         bufferLock.unlock()
     }
