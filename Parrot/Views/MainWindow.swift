@@ -4,6 +4,7 @@ import SwiftUI
 
 enum SidebarTab: String, CaseIterable, Identifiable {
     case home
+    case history
     case modes
     case vocabulary
     case configuration
@@ -15,6 +16,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .home: return "Home"
+        case .history: return "History"
         case .modes: return "Modes"
         case .vocabulary: return "Vocabulary"
         case .configuration: return "Configuration"
@@ -26,6 +28,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .home: return "house"
+        case .history: return "clock.arrow.circlepath"
         case .modes: return "slider.horizontal.3"
         case .vocabulary: return "text.book.closed"
         case .configuration: return "gearshape"
@@ -75,6 +78,8 @@ struct MainWindow: View {
         switch selectedTab {
         case .home:
             HomeView()
+        case .history:
+            HistoryView()
         case .modes:
             ModesView()
         case .vocabulary:

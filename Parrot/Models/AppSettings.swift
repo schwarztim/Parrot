@@ -120,6 +120,8 @@ private enum SettingsKey {
     static let refinementNudgeDismissed = "parrot.refinementNudgeDismissed"
     static let destinationAwareRefinement = "parrot.destinationAwareRefinement"
     static let contextLocalOnly = "parrot.contextLocalOnly"
+    static let historyEnabled = "parrot.historyEnabled"
+    static let historyRetentionDays = "parrot.historyRetentionDays"
     static let recordingWindowStyle = "parrot.recordingWindowStyle"
     static let hotkeyBinding = "parrot.hotkeyBinding"
     static let cancelHotkeyBinding = "parrot.cancelHotkeyBinding"
@@ -229,6 +231,17 @@ final class AppSettings {
     /// (only app and field metadata are). Local providers still see full context.
     var contextLocalOnly: Bool = true {
         didSet { defaults.set(contextLocalOnly, forKey: SettingsKey.contextLocalOnly) }
+    }
+
+    /// When on, dictations are saved to the searchable local history. Off is the
+    /// "store nothing" mode.
+    var historyEnabled: Bool = true {
+        didSet { defaults.set(historyEnabled, forKey: SettingsKey.historyEnabled) }
+    }
+
+    /// Days to keep history. 0 keeps forever.
+    var historyRetentionDays: Int = 30 {
+        didSet { defaults.set(historyRetentionDays, forKey: SettingsKey.historyRetentionDays) }
     }
 
     // MARK: - Transcription Settings
@@ -370,6 +383,8 @@ final class AppSettings {
         refinementNudgeDismissed = defaults.bool(forKey: SettingsKey.refinementNudgeDismissed)
         destinationAwareRefinement = defaults.object(forKey: SettingsKey.destinationAwareRefinement) as? Bool ?? true
         contextLocalOnly = defaults.object(forKey: SettingsKey.contextLocalOnly) as? Bool ?? true
+        historyEnabled = defaults.object(forKey: SettingsKey.historyEnabled) as? Bool ?? true
+        historyRetentionDays = defaults.object(forKey: SettingsKey.historyRetentionDays) as? Int ?? 30
 
         // API keys
         openAIKey = KeychainHelper.load(service: Self.openAIKeychainService, account: Self.keychainAccount) ?? ""

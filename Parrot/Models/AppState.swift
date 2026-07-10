@@ -234,6 +234,7 @@ final class AppState {
     private(set) var vocabularyManager: VocabularyManager?
     private(set) var modeManager: ModeManager?
     private(set) var permissionsManager: PermissionsManager?
+    private(set) var historyStore: HistoryStore?
 
     /// Settings supplying transcription/refinement provider configuration.
     /// Wired at launch by ParrotApp.
@@ -484,6 +485,12 @@ final class AppState {
         // Text inserter
         self.textInserter = TextInserter()
 
+        // History store (searchable local dictation history).
+        self.historyStore = try? HistoryStore(databaseURL: HistoryStore.defaultURL())
+        if let days = settings?.historyRetentionDays, days > 0 {
+            try? historyStore?.pruneOlderThan(days: days)
+        }
+
         // Vocabulary manager
         let vocab = VocabularyManager()
         self.vocabularyManager = vocab
@@ -681,6 +688,7 @@ final class AppState {
 
             do {
                 var text = try await self.transcribe(samples)
+                let rawTranscript = text
 
                 // Apply vocabulary replacements.
                 if let vocab = self.vocabularyManager {
@@ -707,6 +715,11 @@ final class AppState {
 
                 diagLog("[Parrot:AppState] Transcription complete (\(text.count) chars)")
 
+                // Snapshot values needed for history before the completion block
+                // clears the transient context.
+                let ctx = self.capturedContext
+                let modeName = (self.activeDictationMode ?? self.currentMode)?.name
+
                 await MainActor.run {
                     self.lastTranscription = text
                     self.recordingState = .idle
@@ -718,6 +731,16 @@ final class AppState {
                     self.activeDictationMode = nil
                     self.capturedContext = nil
                     self.settings?.successfulDictationCount += 1
+                }
+
+                // Save to history (never for secure fields, never when disabled).
+                if self.settings?.historyEnabled == true, ctx?.isSecureField != true {
+                    try? self.historyStore?.insert(
+                        rawTranscript: rawTranscript,
+                        finalText: text,
+                        appBundleID: ctx?.bundleID,
+                        modeName: modeName
+                    )
                 }
 
                 // Copy to the pasteboard and paste; the text stays on the
