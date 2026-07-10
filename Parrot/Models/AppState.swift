@@ -150,15 +150,11 @@ final class AppState {
         Mode(
             name: "General",
             description: "Default dictation mode",
-            voiceModelVersion: "v3",
-            language: "auto",
             isDefault: true
         ),
         Mode(
             name: "Code",
-            description: "Optimized for programming terminology",
-            voiceModelVersion: "v3",
-            language: "auto"
+            description: "Optimized for programming terminology"
         ),
     ] {
         didSet { modeManager?.replaceAll(modes) }
@@ -188,6 +184,10 @@ final class AppState {
     /// Short label of the detected destination for the recording overlay,
     /// e.g. "Mail (Subject)". Nil when destination-aware refinement is off.
     var destinationLabel: String?
+
+    /// Mode actually used for the in-flight dictation (auto-selected per app, or
+    /// the user's current mode). Transient; never mutates the user's selection.
+    private var activeDictationMode: Mode?
 
     /// Set by the Home refinement nudge to request the main window switch to
     /// the Configuration tab. MainWindow observes and resets it.
@@ -613,18 +613,21 @@ final class AppState {
         }
     }
 
-    /// Captures the frontmost app and focused field for destination-aware
-    /// refinement. No-op (and clears any stale label) when the feature is off.
+    /// Captures the frontmost app and focused field. Always runs (it is cheap,
+    /// bounded by a 0.1s AX timeout, and reads nothing from secure fields) so
+    /// history logging and per-app auto-mode have the bundle id even when
+    /// destination-aware refinement is off. Only the overlay label is gated on
+    /// the setting; RefinementService independently gates prompt context.
     private func captureDestinationContext() {
-        guard settings?.destinationAwareRefinement == true else {
-            capturedContext = nil
-            destinationLabel = nil
-            return
-        }
         let context = ContextSnapshotter.capture()
         capturedContext = context
-        destinationLabel = context.displayLabel
-        diagLog("[Parrot:AppState] Destination: \(context.displayLabel ?? "unknown"), secure=\(context.isSecureField)")
+        destinationLabel = (settings?.destinationAwareRefinement == true) ? context.displayLabel : nil
+
+        // Resolve the effective mode for this dictation: an app-assigned mode
+        // wins, otherwise the user's current mode. Applied transiently so the
+        // user's selection is never mutated.
+        activeDictationMode = modeManager?.mode(forBundleID: context.bundleID) ?? currentMode
+        diagLog("[Parrot:AppState] Destination: \(context.displayLabel ?? "unknown"), secure=\(context.isSecureField), mode=\(activeDictationMode?.name ?? "-")")
     }
 
     /// Stops recording, transcribes captured audio, and inserts the result as text.
@@ -690,7 +693,7 @@ final class AppState {
                     do {
                         text = try await RefinementService.refine(
                             text,
-                            modePrompt: self.currentMode?.refinementPrompt,
+                            modePrompt: (self.activeDictationMode ?? self.currentMode)?.refinementPrompt,
                             context: self.capturedContext,
                             settings: settings
                         )
@@ -712,6 +715,8 @@ final class AppState {
                     self.waveformAmplitudes = []
                     self.isEnhanceMode = false
                     self.destinationLabel = nil
+                    self.activeDictationMode = nil
+                    self.capturedContext = nil
                     self.settings?.successfulDictationCount += 1
                 }
 
@@ -849,6 +854,9 @@ final class AppState {
         currentStatus = .idle
         recordingDuration = 0
         waveformAmplitudes = []
+        destinationLabel = nil
+        activeDictationMode = nil
+        capturedContext = nil
     }
     // MARK: - Hotkey Sync
 

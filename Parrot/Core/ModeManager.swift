@@ -16,7 +16,10 @@ final class ModeManager {
 
     // MARK: - Persistence
 
-    private static var storageURL: URL {
+    private let storageURL: URL
+    private let defaults: UserDefaults
+
+    static var defaultStorageURL: URL {
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
         ).first!
@@ -27,9 +30,17 @@ final class ModeManager {
 
     // MARK: - Initialization
 
-    init() {
+    init(storageURL: URL = ModeManager.defaultStorageURL, defaults: UserDefaults = .standard) {
+        self.storageURL = storageURL
+        self.defaults = defaults
         // Temporary assignment; will be replaced by load() or default.
         self.selectedMode = Mode.defaultMode
+
+        // Remove the retired duplicate key once written by AppSettings
+        // ("parrot.selectedModeID"); ModeManager's "Parrot.selectedModeID" is
+        // the single source of truth.
+        defaults.removeObject(forKey: "parrot.selectedModeID")
+
         load()
 
         // Ensure there is always at least the default mode.
@@ -102,7 +113,7 @@ final class ModeManager {
     private func save() {
         do {
             let data = try JSONEncoder().encode(modes)
-            try data.write(to: Self.storageURL, options: .atomic)
+            try data.write(to: storageURL, options: .atomic)
         } catch {
             // Non-fatal.
         }
@@ -110,11 +121,10 @@ final class ModeManager {
     }
 
     private func load() {
-        let url = Self.storageURL
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard FileManager.default.fileExists(atPath: storageURL.path) else { return }
 
         do {
-            let data = try Data(contentsOf: url)
+            let data = try Data(contentsOf: storageURL)
             modes = try JSONDecoder().decode([Mode].self, from: data)
         } catch {
             modes = []
@@ -124,13 +134,22 @@ final class ModeManager {
     private static let selectedModeKey = "Parrot.selectedModeID"
 
     private func saveSelectedModeID(_ id: UUID) {
-        UserDefaults.standard.set(id.uuidString, forKey: Self.selectedModeKey)
+        defaults.set(id.uuidString, forKey: Self.selectedModeKey)
     }
 
     private func loadSelectedModeID() -> UUID? {
-        guard let string = UserDefaults.standard.string(forKey: Self.selectedModeKey) else {
+        guard let string = defaults.string(forKey: Self.selectedModeKey) else {
             return nil
         }
         return UUID(uuidString: string)
+    }
+
+    // MARK: - Per-App Auto-Mode
+
+    /// First mode (in list order) that claims the given bundle id,
+    /// case-insensitively. Nil for a nil or unclaimed bundle id.
+    func mode(forBundleID bundleID: String?) -> Mode? {
+        guard let id = bundleID?.lowercased() else { return nil }
+        return modes.first { $0.appBundleIDs?.contains { $0.lowercased() == id } == true }
     }
 }

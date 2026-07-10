@@ -131,7 +131,6 @@ private enum SettingsKey {
     static let soundEffectsVolume = "parrot.soundEffectsVolume"
     static let selectedInputDeviceID = "parrot.selectedInputDeviceID"
     static let hasCompletedOnboarding = "parrot.hasCompletedOnboarding"
-    static let selectedModeID = "parrot.selectedModeID"
 }
 
 // MARK: - AppSettings
@@ -321,15 +320,6 @@ final class AppSettings {
         didSet { defaults.set(hasCompletedOnboarding, forKey: SettingsKey.hasCompletedOnboarding) }
     }
 
-    var selectedModeID: UUID? = nil {
-        didSet {
-            if let id = selectedModeID {
-                defaults.set(id.uuidString, forKey: SettingsKey.selectedModeID)
-            } else {
-                defaults.removeObject(forKey: SettingsKey.selectedModeID)
-            }
-        }
-    }
 
     // MARK: - Persistence Helpers
 
@@ -424,10 +414,6 @@ final class AppSettings {
 
         if defaults.object(forKey: SettingsKey.hasCompletedOnboarding) != nil {
             hasCompletedOnboarding = defaults.bool(forKey: SettingsKey.hasCompletedOnboarding)
-        }
-
-        if let uuidString = defaults.string(forKey: SettingsKey.selectedModeID) {
-            selectedModeID = UUID(uuidString: uuidString)
         }
     }
 
