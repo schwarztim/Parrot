@@ -811,6 +811,27 @@ final class AppState {
         startRecording()
     }
 
+    /// Toggles dictation: starts recording if idle, stops (and transcribes) if
+    /// currently recording. Used by the `parrot://` URL scheme and tap-to-toggle.
+    func toggleDictation() {
+        if isRecording {
+            stopRecording()
+        } else {
+            startRecording()
+        }
+    }
+
+    /// Selects a mode by name (case-insensitive). Returns true if found.
+    @discardableResult
+    func selectMode(named name: String) -> Bool {
+        guard let mode = modes.first(where: {
+            $0.name.compare(name, options: .caseInsensitive) == .orderedSame
+        }) else { return false }
+        currentMode = mode
+        modeManager?.selectMode(mode)
+        return true
+    }
+
     /// Cancels the current recording without transcribing.
     func cancelRecording() {
         guard isRecording, let recorder = audioRecorder else { return }

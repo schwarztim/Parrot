@@ -73,6 +73,17 @@ cat > "$APP_DIR/Contents/Info.plist" << PLIST
     <false/>
     <key>NSMicrophoneUsageDescription</key>
     <string>Parrot needs microphone access to record your voice for transcription.</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.parrot.dev.url</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>parrot</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST

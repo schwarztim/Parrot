@@ -40,6 +40,31 @@ final class ParrotAppDelegate: NSObject, NSApplicationDelegate, ObservableObject
         }
     }
 
+    /// Handles the `parrot://` URL scheme for scripting (Raycast, Alfred, Stream
+    /// Deck, `open parrot://toggle`). Supported hosts:
+    ///   parrot://toggle[?mode=Name]   toggle dictation (optionally set a mode)
+    ///   parrot://start[?mode=Name]    start recording
+    ///   parrot://stop                 stop and transcribe
+    ///   parrot://cancel               cancel without transcribing
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let appState else { return }
+        for url in urls where url.scheme == "parrot" {
+            let action = url.host()?.lowercased() ?? ""
+            let mode = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "mode" })?.value
+            Task { @MainActor in
+                if let mode { appState.selectMode(named: mode) }
+                switch action {
+                case "toggle": appState.toggleDictation()
+                case "start": appState.startRecording()
+                case "stop": appState.stopRecording()
+                case "cancel": appState.cancelRecording()
+                default: break
+                }
+            }
+        }
+    }
+
     func showOnboardingWindow() {
         guard let appState, let appSettings else { return }
 
