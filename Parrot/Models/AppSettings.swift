@@ -118,6 +118,8 @@ private enum SettingsKey {
     static let azureWhisperDeployment = "parrot.azureWhisperDeployment"
     static let successfulDictationCount = "parrot.successfulDictationCount"
     static let refinementNudgeDismissed = "parrot.refinementNudgeDismissed"
+    static let destinationAwareRefinement = "parrot.destinationAwareRefinement"
+    static let contextLocalOnly = "parrot.contextLocalOnly"
     static let recordingWindowStyle = "parrot.recordingWindowStyle"
     static let hotkeyBinding = "parrot.hotkeyBinding"
     static let cancelHotkeyBinding = "parrot.cancelHotkeyBinding"
@@ -215,6 +217,19 @@ final class AppSettings {
     /// Whether to show the one-time AI Refinement discovery card on Home.
     var shouldShowRefinementNudge: Bool {
         !refinementNudgeDismissed && !refinementEnabled && successfulDictationCount >= 5
+    }
+
+    /// When on, refinement is told which app and field the text is going into,
+    /// so it matches the destination's tone and format. Reads only local
+    /// Accessibility data.
+    var destinationAwareRefinement: Bool = true {
+        didSet { defaults.set(destinationAwareRefinement, forKey: SettingsKey.destinationAwareRefinement) }
+    }
+
+    /// When on, field text content is never sent to cloud refinement providers
+    /// (only app and field metadata are). Local providers still see full context.
+    var contextLocalOnly: Bool = true {
+        didSet { defaults.set(contextLocalOnly, forKey: SettingsKey.contextLocalOnly) }
     }
 
     // MARK: - Transcription Settings
@@ -363,6 +378,8 @@ final class AppSettings {
         azureWhisperDeployment = defaults.string(forKey: SettingsKey.azureWhisperDeployment) ?? ""
         successfulDictationCount = defaults.integer(forKey: SettingsKey.successfulDictationCount)
         refinementNudgeDismissed = defaults.bool(forKey: SettingsKey.refinementNudgeDismissed)
+        destinationAwareRefinement = defaults.object(forKey: SettingsKey.destinationAwareRefinement) as? Bool ?? true
+        contextLocalOnly = defaults.object(forKey: SettingsKey.contextLocalOnly) as? Bool ?? true
 
         // API keys
         openAIKey = KeychainHelper.load(service: Self.openAIKeychainService, account: Self.keychainAccount) ?? ""

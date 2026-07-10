@@ -103,6 +103,18 @@ struct ConfigurationView: View {
                             testResult = nil
                         }
 
+                        Toggle("Destination-aware refinement", isOn: $settings.destinationAwareRefinement)
+                        Text("Adapts tone and format to the app and field you dictate into (email style in Mail, casual in chat, no rewriting in code). Reads only local Accessibility data.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        if settings.destinationAwareRefinement, settings.refinementProvider != .localServer {
+                            Toggle("Keep field content on-device only", isOn: $settings.contextLocalOnly)
+                            Text("When on, the surrounding field text is never sent to the cloud provider; only the app name and field type are.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
                         providerFields(settings: $settings)
 
                         HStack {

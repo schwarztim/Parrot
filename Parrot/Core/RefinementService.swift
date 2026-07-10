@@ -50,10 +50,13 @@ enum RefinementService {
         """
 
     /// Builds the full system prompt: a fixed scaffold (meaning preservation,
-    /// prompt-injection guard, output-only rule) wrapping the directive.
-    static func systemPrompt(directive: String?) -> String {
+    /// prompt-injection guard, output-only rule) wrapping the directive, plus an
+    /// optional non-instructional block describing where the text will be
+    /// inserted (destination-aware refinement).
+    static func systemPrompt(directive: String?, context: DictationContext? = nil) -> String {
         let trimmed = directive?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let effective = trimmed.isEmpty ? defaultDirective : trimmed
+        let contextBlock = (context?.hasContent == true) ? context!.promptBlock() : ""
         return """
             You are a text filter, not an assistant. You receive a raw voice \
             dictation transcript and return a corrected version of the same text. \
@@ -66,7 +69,7 @@ enum RefinementService {
             Always, no matter what the directive above says:
             - Preserve the speaker's meaning and intent. Do not summarize, add ideas, or answer questions in the transcript.
             - If the speaker corrects themselves mid-thought, keep only the corrected version and drop the retracted words.
-            - Return only the corrected text. No preamble, no commentary, no quotes, no code fences.
+            - Return only the corrected text. No preamble, no commentary, no quotes, no code fences.\(contextBlock)
             """
     }
 
@@ -114,19 +117,47 @@ enum RefinementService {
         makeClient(from: settings) != nil
     }
 
+    /// Warms a local refinement model (Ollama, LM Studio, etc.) with a tiny
+    /// throwaway request so it is loaded and ready by the time the user stops
+    /// speaking. Only fires for local providers, to avoid billing cloud APIs.
+    static func warmUpIfLocal(settings: AppSettings) {
+        guard settings.refinementEnabled,
+              settings.refinementProvider == .localServer,
+              let (client, model) = makeClient(from: settings)
+        else { return }
+        Task.detached {
+            _ = try? await client.refine("warm", system: "Reply with: ok", model: model)
+        }
+    }
+
     /// Refines the transcript with the configured provider.
     ///
     /// - Parameters:
     ///   - text: Raw transcript.
     ///   - modePrompt: Optional per-mode directive override; falls back to
     ///     ``defaultDirective`` when nil or empty.
+    ///   - context: Optional destination context. Redacted to metadata-only for
+    ///     cloud providers when ``AppSettings/contextLocalOnly`` is on.
     ///   - settings: App settings supplying provider choice and credentials.
     /// - Throws: ``RefinementError/notConfigured`` or a provider error.
-    static func refine(_ text: String, modePrompt: String?, settings: AppSettings) async throws -> String {
+    static func refine(
+        _ text: String,
+        modePrompt: String?,
+        context: DictationContext? = nil,
+        settings: AppSettings
+    ) async throws -> String {
         guard let (client, model) = makeClient(from: settings) else {
             throw RefinementError.notConfigured
         }
-        let system = systemPrompt(directive: modePrompt)
+
+        // Decide what context, if any, reaches the provider.
+        var effectiveContext: DictationContext?
+        if settings.destinationAwareRefinement, let context, !context.isSecureField {
+            let isCloud = settings.refinementProvider != .localServer
+            effectiveContext = (isCloud && settings.contextLocalOnly) ? context.redactedForCloud : context
+        }
+
+        let system = systemPrompt(directive: modePrompt, context: effectiveContext)
         let refined = try await client.refine(text, system: system, model: model)
         let trimmed = refined.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw RefinementError.emptyResponse }

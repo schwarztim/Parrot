@@ -13,7 +13,7 @@ Two independent layers, each local or cloud:
    - Cloud failures fall back to on-device Parakeet with a non-blocking error toast.
 
 2. **Refinement (raw transcript to clean text, optional)**
-   The transcript is sent to an LLM that fixes dictation errors (homophones, run-ons, punctuation, capitalization, fillers) and formats it, while preserving meaning. Providers:
+   The transcript is sent to an LLM that fixes dictation errors (homophones, run-ons, punctuation, capitalization, fillers) and formats it, while preserving meaning. Refinement is **destination-aware**: at hotkey-down Parrot reads the frontmost app and focused field (via the Accessibility API already granted for paste, no new permission) and tells the model where the text is going, so output matches the destination (email register in Mail, casual in chat, no prose rewriting in a code editor, a single line in a search box). Field content is read only locally and is never sent to a cloud provider unless you opt in (Configuration > AI Refinement); secure/password fields are never read. Providers:
    - **Local (Ollama / LM Studio / llama.cpp / vLLM)**: any OpenAI-compatible server via configurable base URL (default `http://localhost:11434/v1`), no key required. Installed Ollama models are listed via `/api/tags`.
    - **OpenAI**: `https://api.openai.com/v1/chat/completions`, Bearer auth.
    - **Azure OpenAI**: deployment URL with `api-key` header (API version `2024-10-21`).
@@ -47,6 +47,13 @@ On first launch a guided onboarding wizard walks through the four grants and a l
 - **Modes tab**: per-mode refinement directive (e.g. "Format as a professional email"). Empty uses the default cleanup directive.
 
 API keys are stored in the macOS Keychain, one service per provider (`com.parrot.openai`, `com.parrot.azure-openai`, `com.parrot.anthropic`, `com.parrot.local-server`). They are never written to UserDefaults or logs.
+
+### Privacy
+
+- Dictation is on-device by default (Parakeet transcription, refinement off). Audio and text leave the machine only when you choose a cloud provider.
+- Destination context (surrounding field text) is read locally and, for cloud refinement providers, redacted to app and field metadata unless you turn off "Keep field content on-device only". Secure fields are never read.
+- Transcripts are never logged. Diagnostic logging is off by default; enable it with `defaults write com.parrot.dev parrot.debugLogging -bool YES` (the log lives under Application Support with owner-only permissions and never contains transcript content).
+- Pasted text is marked concealed so well-behaved clipboard managers do not retain a copy.
 
 ## App Icon
 

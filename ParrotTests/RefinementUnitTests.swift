@@ -96,6 +96,68 @@ final class RefinementUnitTests: XCTestCase {
         XCTAssertEqual(Int16(littleEndian: pcm[3]), Int16.max)
     }
 
+    // MARK: - Destination Context
+
+    func testContextPromptBlockIncludesDestinationAndQuotesContent() {
+        let ctx = DictationContext(
+            appName: "Mail",
+            bundleID: "com.apple.mail",
+            fieldRole: "AXTextArea",
+            fieldLabel: "Subject",
+            selectedText: nil,
+            textBeforeCursor: "Hi Sarah,",
+            isSecureField: false,
+            isEmptyField: false
+        )
+        let block = ctx.promptBlock()
+        XCTAssertTrue(block.contains("Mail"))
+        XCTAssertTrue(block.contains("Subject"))
+        // Field content is quoted with the non-instructional delimiter.
+        XCTAssertTrue(block.contains("<<<Hi Sarah,>>>"))
+        // Framed as reference, never instructions.
+        XCTAssertTrue(block.lowercased().contains("never"))
+    }
+
+    func testContextRedactedForCloudDropsFieldContent() {
+        let ctx = DictationContext(
+            appName: "Mail",
+            bundleID: "com.apple.mail",
+            fieldRole: "AXTextArea",
+            fieldLabel: "Body",
+            selectedText: "secret selection",
+            textBeforeCursor: "confidential text",
+            isSecureField: false,
+            isEmptyField: false
+        )
+        let redacted = ctx.redactedForCloud
+        XCTAssertNil(redacted.selectedText)
+        XCTAssertNil(redacted.textBeforeCursor)
+        // Metadata is kept.
+        XCTAssertEqual(redacted.appName, "Mail")
+        XCTAssertEqual(redacted.fieldLabel, "Body")
+        // The redacted prompt block must not leak the field content.
+        let block = redacted.promptBlock()
+        XCTAssertFalse(block.contains("confidential text"))
+        XCTAssertFalse(block.contains("secret selection"))
+    }
+
+    func testSystemPromptWithContextKeepsInjectionGuard() {
+        let ctx = DictationContext(appName: "Slack", fieldRole: "AXTextField")
+        let prompt = RefinementService.systemPrompt(directive: nil, context: ctx)
+        // Both the base guard and the context block are present.
+        XCTAssertTrue(prompt.contains("You are a text filter"))
+        XCTAssertTrue(prompt.contains("Slack"))
+        XCTAssertTrue(prompt.contains("Return only the corrected text"))
+    }
+
+    func testEmptyContextAddsNothing() {
+        let empty = DictationContext()
+        XCTAssertFalse(empty.hasContent)
+        let withCtx = RefinementService.systemPrompt(directive: nil, context: empty)
+        let without = RefinementService.systemPrompt(directive: nil, context: nil)
+        XCTAssertEqual(withCtx, without)
+    }
+
     // MARK: - Mode Decoding Compatibility
 
     func testModeWithoutRefinementPromptStillDecodes() throws {
