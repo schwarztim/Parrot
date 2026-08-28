@@ -70,8 +70,14 @@ final class VocabularyManager {
     /// - Title-case match -> title-case replacement
     /// - Otherwise -> replacement as-is
     func apply(to text: String) -> String {
-        var result = text
+        Self.apply(entries: entries, to: text)
+    }
 
+    /// Pure, storage-free application of vocabulary entries to text. Exposed as
+    /// a static function so it can be tested without touching the persisted
+    /// vocabulary file.
+    static func apply(entries: [VocabularyEntry], to text: String) -> String {
+        var result = text
         for entry in entries where entry.isEnabled && !entry.original.isEmpty {
             result = replacePreservingCase(
                 in: result,
@@ -79,13 +85,12 @@ final class VocabularyManager {
                 replacement: entry.replacement
             )
         }
-
         return result
     }
 
     // MARK: - Private Helpers
 
-    private func replacePreservingCase(
+    private static func replacePreservingCase(
         in text: String,
         target: String,
         replacement: String
@@ -98,20 +103,50 @@ final class VocabularyManager {
             options: .caseInsensitive,
             range: searchRange
         ) {
-            output += text[searchRange.lowerBound..<range.lowerBound]
-
-            let matched = String(text[range])
-            let adjusted = adjustCase(of: replacement, toMatch: matched)
-            output += adjusted
-
-            searchRange = range.upperBound..<text.endIndex
+            // Only replace whole-word matches so "cat" does not fire inside
+            // "concatenate". Boundaries are only required on a side where the
+            // target itself ends in a word character.
+            if isWordBoundaryMatch(range, in: text, target: target) {
+                output += text[searchRange.lowerBound..<range.lowerBound]
+                let matched = String(text[range])
+                output += adjustCase(of: replacement, toMatch: matched)
+                searchRange = range.upperBound..<text.endIndex
+            } else {
+                // Keep the matched text as-is and advance past its first
+                // character so overlapping matches are still found.
+                let next = text.index(after: range.lowerBound)
+                output += text[searchRange.lowerBound..<next]
+                searchRange = next..<text.endIndex
+            }
         }
 
         output += text[searchRange]
         return output
     }
 
-    private func adjustCase(of replacement: String, toMatch matched: String) -> String {
+    /// True when the matched range sits on word boundaries. A boundary is only
+    /// enforced on a side whose adjacent target character is a word character
+    /// (letter or digit), so targets that begin or end with punctuation still
+    /// match mid-word on that side.
+    private static func isWordBoundaryMatch(
+        _ range: Range<String.Index>,
+        in text: String,
+        target: String
+    ) -> Bool {
+        func isWord(_ c: Character) -> Bool { c.isLetter || c.isNumber }
+
+        if let first = target.first, isWord(first), range.lowerBound > text.startIndex {
+            let before = text[text.index(before: range.lowerBound)]
+            if isWord(before) { return false }
+        }
+        if let last = target.last, isWord(last), range.upperBound < text.endIndex {
+            let after = text[range.upperBound]
+            if isWord(after) { return false }
+        }
+        return true
+    }
+
+    private static func adjustCase(of replacement: String, toMatch matched: String) -> String {
         guard !matched.isEmpty, !replacement.isEmpty else { return replacement }
 
         let isAllUppercase = matched == matched.uppercased() && matched != matched.lowercased()

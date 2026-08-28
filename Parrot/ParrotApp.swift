@@ -21,9 +21,46 @@ final class ParrotAppDelegate: NSObject, NSApplicationDelegate, ObservableObject
 
         DispatchQueue.main.async { [self] in
             if !appSettings.hasCompletedOnboarding {
+                // Regular activation during onboarding so the wizard and the
+                // system TCC prompts reliably take focus.
+                NSApp.setActivationPolicy(.regular)
                 showOnboardingWindow()
             } else {
                 showMainWindow()
+            }
+        }
+    }
+
+    /// Re-check permissions whenever Parrot comes to the foreground, so grants
+    /// or revocations made in System Settings (or lost on an app update) are
+    /// reflected in the menu bar health surface.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        Task { @MainActor in
+            appState?.refreshPermissionHealth()
+        }
+    }
+
+    /// Handles the `parrot://` URL scheme for scripting (Raycast, Alfred, Stream
+    /// Deck, `open parrot://toggle`). Supported hosts:
+    ///   parrot://toggle[?mode=Name]   toggle dictation (optionally set a mode)
+    ///   parrot://start[?mode=Name]    start recording
+    ///   parrot://stop                 stop and transcribe
+    ///   parrot://cancel               cancel without transcribing
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let appState else { return }
+        for url in urls where url.scheme == "parrot" {
+            let action = url.host()?.lowercased() ?? ""
+            let mode = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "mode" })?.value
+            Task { @MainActor in
+                if let mode { appState.selectMode(named: mode) }
+                switch action {
+                case "toggle": appState.toggleDictation()
+                case "start": appState.startRecording()
+                case "stop": appState.stopRecording()
+                case "cancel": appState.cancelRecording()
+                default: break
+                }
             }
         }
     }
@@ -41,6 +78,7 @@ final class ParrotAppDelegate: NSObject, NSApplicationDelegate, ObservableObject
                 self?.onboardingWindow = nil
                 self?.showMainWindow()
             })
+            .onAppear { NSApp.setActivationPolicy(.regular) }
             .environment(appState)
             .environment(appSettings)
 
@@ -67,6 +105,12 @@ final class ParrotAppDelegate: NSObject, NSApplicationDelegate, ObservableObject
         onboardingWindow?.close()
         onboardingWindow = nil
 
+        // Once onboarding is done, become a menu-bar accessory (no Dock icon,
+        // out of Cmd-Tab). The settings window still opens on demand.
+        if appSettings.hasCompletedOnboarding {
+            NSApp.setActivationPolicy(.accessory)
+        }
+
         if mainWindow == nil {
             let view = MainWindow()
                 .environment(appState)
@@ -74,7 +118,6 @@ final class ParrotAppDelegate: NSObject, NSApplicationDelegate, ObservableObject
                 .onAppear {
                     appState.setup()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        appState.textEnhancer?.configure(from: appSettings)
                         appState.syncHotkeys(from: appSettings)
                     }
                 }
@@ -112,6 +155,7 @@ struct ParrotApp: App {
         let settings = AppSettings()
         _appState = State(initialValue: state)
         _appSettings = State(initialValue: settings)
+        state.settings = settings
         appDelegate.appState = state
         appDelegate.appSettings = settings
     }
@@ -133,6 +177,11 @@ struct ParrotApp: App {
         if appState.isRecording || appState.recordingState == .recording {
             return "mic.fill"
         }
+        // Flag missing permissions right in the menu bar glyph, but only once
+        // onboarding is done (during onboarding the wizard owns permissions).
+        if appSettings.hasCompletedOnboarding, !appState.permissionWarnings.isEmpty {
+            return "mic.badge.xmark"
+        }
         return "mic.fill"
     }
 }
@@ -148,12 +197,31 @@ private struct MenuBarContentView: View {
         // Status header
         statusSection
 
+        // Permission health rows (only after onboarding, only when unhealthy).
+        if appSettings.hasCompletedOnboarding {
+            let warnings = appState.permissionWarnings
+            if !warnings.isEmpty {
+                Divider()
+                ForEach(warnings) { warning in
+                    Button {
+                        appState.openPermissionSettings(warning.pane)
+                    } label: {
+                        Label(warning.message, systemImage: "exclamationmark.triangle.fill")
+                    }
+                }
+            }
+        }
+
         Divider()
 
-        // Open main window
+        // Open main window (or resume onboarding if it isn't finished).
         Button("Open Parrot...") {
             if let delegate = NSApplication.shared.delegate as? ParrotAppDelegate {
-                delegate.showMainWindow()
+                if appSettings.hasCompletedOnboarding {
+                    delegate.showMainWindow()
+                } else {
+                    delegate.showOnboardingWindow()
+                }
             }
         }
         .keyboardShortcut(",", modifiers: .command)

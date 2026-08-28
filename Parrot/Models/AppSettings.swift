@@ -101,8 +101,28 @@ extension HotkeyBinding: Codable {
 // MARK: - UserDefaults Keys
 
 private enum SettingsKey {
+    // Legacy enhance-mode keys, migrated to the Azure OpenAI refinement fields.
     static let enhanceEndpoint = "parrot.enhanceEndpoint"
     static let enhanceModel = "parrot.enhanceModel"
+    static let refinementEnabled = "parrot.refinementEnabled"
+    static let refinementProvider = "parrot.refinementProvider"
+    static let localServerBaseURL = "parrot.localServerBaseURL"
+    static let localServerModel = "parrot.localServerModel"
+    static let openAIModel = "parrot.openAIModel"
+    static let azureOpenAIEndpoint = "parrot.azureOpenAIEndpoint"
+    static let azureOpenAIDeployment = "parrot.azureOpenAIDeployment"
+    static let azureOpenAIAPIVersion = "parrot.azureOpenAIAPIVersion"
+    static let anthropicModel = "parrot.anthropicModel"
+    static let transcriptionProvider = "parrot.transcriptionProvider"
+    static let openAITranscriptionModel = "parrot.openAITranscriptionModel"
+    static let azureWhisperDeployment = "parrot.azureWhisperDeployment"
+    static let successfulDictationCount = "parrot.successfulDictationCount"
+    static let refinementNudgeDismissed = "parrot.refinementNudgeDismissed"
+    static let destinationAwareRefinement = "parrot.destinationAwareRefinement"
+    static let contextLocalOnly = "parrot.contextLocalOnly"
+    static let historyEnabled = "parrot.historyEnabled"
+    static let historyRetentionDays = "parrot.historyRetentionDays"
+    static let vocabularyBoostingEnabled = "parrot.vocabularyBoostingEnabled"
     static let recordingWindowStyle = "parrot.recordingWindowStyle"
     static let hotkeyBinding = "parrot.hotkeyBinding"
     static let cancelHotkeyBinding = "parrot.cancelHotkeyBinding"
@@ -114,7 +134,6 @@ private enum SettingsKey {
     static let soundEffectsVolume = "parrot.soundEffectsVolume"
     static let selectedInputDeviceID = "parrot.selectedInputDeviceID"
     static let hasCompletedOnboarding = "parrot.hasCompletedOnboarding"
-    static let selectedModeID = "parrot.selectedModeID"
 }
 
 // MARK: - AppSettings
@@ -133,27 +152,145 @@ final class AppSettings {
 
     // MARK: - Keychain Constants
 
-    private static let keychainService = "com.parrot.enhance"
+    /// Legacy enhance-mode service, migrated to `azureKeychainService`.
+    private static let legacyKeychainService = "com.parrot.enhance"
+    private static let openAIKeychainService = "com.parrot.openai"
+    private static let azureKeychainService = "com.parrot.azure-openai"
+    private static let anthropicKeychainService = "com.parrot.anthropic"
+    private static let localServerKeychainService = "com.parrot.local-server"
     private static let keychainAccount = "apiKey"
 
-    // MARK: - Enhance Mode Settings
+    // MARK: - Refinement Settings
 
-    var enhanceEndpoint: String = "" {
-        didSet { defaults.set(enhanceEndpoint, forKey: SettingsKey.enhanceEndpoint) }
+    /// When true, transcripts are refined by the selected LLM provider before
+    /// pasting. When false (or the provider is unconfigured), the raw
+    /// transcript is pasted unchanged, so the app works fully offline.
+    var refinementEnabled: Bool = false {
+        didSet { defaults.set(refinementEnabled, forKey: SettingsKey.refinementEnabled) }
     }
 
-    var enhanceModel: String = "" {
-        didSet { defaults.set(enhanceModel, forKey: SettingsKey.enhanceModel) }
+    var refinementProvider: RefinementProvider = .localServer {
+        didSet { defaults.set(refinementProvider.rawValue, forKey: SettingsKey.refinementProvider) }
     }
 
-    /// The API key is stored in the macOS Keychain, not UserDefaults.
-    var enhanceApiKey: String = "" {
-        didSet {
-            if enhanceApiKey.isEmpty {
-                KeychainHelper.delete(service: Self.keychainService, account: Self.keychainAccount)
-            } else {
-                KeychainHelper.save(enhanceApiKey, service: Self.keychainService, account: Self.keychainAccount)
-            }
+    /// OpenAI-compatible base URL for local servers (Ollama, LM Studio,
+    /// llama.cpp, vLLM), including the version path.
+    var localServerBaseURL: String = "http://localhost:11434/v1" {
+        didSet { defaults.set(localServerBaseURL, forKey: SettingsKey.localServerBaseURL) }
+    }
+
+    var localServerModel: String = "" {
+        didSet { defaults.set(localServerModel, forKey: SettingsKey.localServerModel) }
+    }
+
+    var openAIModel: String = "gpt-4o-mini" {
+        didSet { defaults.set(openAIModel, forKey: SettingsKey.openAIModel) }
+    }
+
+    /// Azure resource endpoint, e.g. "https://my-resource.openai.azure.com".
+    var azureOpenAIEndpoint: String = "" {
+        didSet { defaults.set(azureOpenAIEndpoint, forKey: SettingsKey.azureOpenAIEndpoint) }
+    }
+
+    /// Azure chat-model deployment name.
+    var azureOpenAIDeployment: String = "" {
+        didSet { defaults.set(azureOpenAIDeployment, forKey: SettingsKey.azureOpenAIDeployment) }
+    }
+
+    var azureOpenAIAPIVersion: String = "2024-10-21" {
+        didSet { defaults.set(azureOpenAIAPIVersion, forKey: SettingsKey.azureOpenAIAPIVersion) }
+    }
+
+    var anthropicModel: String = "claude-haiku-4-5" {
+        didSet { defaults.set(anthropicModel, forKey: SettingsKey.anthropicModel) }
+    }
+
+    /// Count of successful dictations, used to time the one-time AI Refinement
+    /// discovery nudge (it appears after a handful of dictations).
+    var successfulDictationCount: Int = 0 {
+        didSet { defaults.set(successfulDictationCount, forKey: SettingsKey.successfulDictationCount) }
+    }
+
+    /// True once the user has acted on or dismissed the refinement nudge.
+    var refinementNudgeDismissed: Bool = false {
+        didSet { defaults.set(refinementNudgeDismissed, forKey: SettingsKey.refinementNudgeDismissed) }
+    }
+
+    /// Whether to show the one-time AI Refinement discovery card on Home.
+    var shouldShowRefinementNudge: Bool {
+        !refinementNudgeDismissed && !refinementEnabled && successfulDictationCount >= 5
+    }
+
+    /// When on, refinement is told which app and field the text is going into,
+    /// so it matches the destination's tone and format. Reads only local
+    /// Accessibility data.
+    var destinationAwareRefinement: Bool = true {
+        didSet { defaults.set(destinationAwareRefinement, forKey: SettingsKey.destinationAwareRefinement) }
+    }
+
+    /// When on, field text content is never sent to cloud refinement providers
+    /// (only app and field metadata are). Local providers still see full context.
+    var contextLocalOnly: Bool = true {
+        didSet { defaults.set(contextLocalOnly, forKey: SettingsKey.contextLocalOnly) }
+    }
+
+    /// When on, dictations are saved to the searchable local history. Off is the
+    /// "store nothing" mode.
+    var historyEnabled: Bool = true {
+        didSet { defaults.set(historyEnabled, forKey: SettingsKey.historyEnabled) }
+    }
+
+    /// Days to keep history. 0 keeps forever.
+    var historyRetentionDays: Int = 30 {
+        didSet { defaults.set(historyRetentionDays, forKey: SettingsKey.historyRetentionDays) }
+    }
+
+    /// When on, vocabulary terms bias the recognizer at decode time (downloads
+    /// an auxiliary CTC model). Off by default because of the extra download.
+    var vocabularyBoostingEnabled: Bool = false {
+        didSet { defaults.set(vocabularyBoostingEnabled, forKey: SettingsKey.vocabularyBoostingEnabled) }
+    }
+
+    // MARK: - Transcription Settings
+
+    var transcriptionProvider: TranscriptionProviderChoice = .parakeet {
+        didSet { defaults.set(transcriptionProvider.rawValue, forKey: SettingsKey.transcriptionProvider) }
+    }
+
+    var openAITranscriptionModel: String = "whisper-1" {
+        didSet { defaults.set(openAITranscriptionModel, forKey: SettingsKey.openAITranscriptionModel) }
+    }
+
+    /// Azure Whisper deployment name. Uses the same resource endpoint, key,
+    /// and API version as Azure OpenAI refinement.
+    var azureWhisperDeployment: String = "" {
+        didSet { defaults.set(azureWhisperDeployment, forKey: SettingsKey.azureWhisperDeployment) }
+    }
+
+    // MARK: - API Keys (Keychain, one service per provider, never logged)
+
+    var openAIKey: String = "" {
+        didSet { saveKey(openAIKey, service: Self.openAIKeychainService) }
+    }
+
+    var azureOpenAIKey: String = "" {
+        didSet { saveKey(azureOpenAIKey, service: Self.azureKeychainService) }
+    }
+
+    var anthropicKey: String = "" {
+        didSet { saveKey(anthropicKey, service: Self.anthropicKeychainService) }
+    }
+
+    /// Optional Bearer token for local servers that require one.
+    var localServerKey: String = "" {
+        didSet { saveKey(localServerKey, service: Self.localServerKeychainService) }
+    }
+
+    private func saveKey(_ value: String, service: String) {
+        if value.isEmpty {
+            KeychainHelper.delete(service: service, account: Self.keychainAccount)
+        } else {
+            KeychainHelper.save(value, service: service, account: Self.keychainAccount)
         }
     }
 
@@ -203,15 +340,6 @@ final class AppSettings {
         didSet { defaults.set(hasCompletedOnboarding, forKey: SettingsKey.hasCompletedOnboarding) }
     }
 
-    var selectedModeID: UUID? = nil {
-        didSet {
-            if let id = selectedModeID {
-                defaults.set(id.uuidString, forKey: SettingsKey.selectedModeID)
-            } else {
-                defaults.removeObject(forKey: SettingsKey.selectedModeID)
-            }
-        }
-    }
 
     // MARK: - Persistence Helpers
 
@@ -235,13 +363,44 @@ final class AppSettings {
     }
 
     private func loadAll() {
-        // Enhance Mode
-        enhanceEndpoint = defaults.string(forKey: SettingsKey.enhanceEndpoint) ?? ""
-        enhanceModel = defaults.string(forKey: SettingsKey.enhanceModel) ?? ""
-        enhanceApiKey = KeychainHelper.load(
-            service: Self.keychainService,
-            account: Self.keychainAccount
-        ) ?? ""
+        // Refinement
+        refinementEnabled = defaults.bool(forKey: SettingsKey.refinementEnabled)
+        if let raw = defaults.string(forKey: SettingsKey.refinementProvider),
+           let provider = RefinementProvider(rawValue: raw)
+        {
+            refinementProvider = provider
+        }
+        localServerBaseURL = defaults.string(forKey: SettingsKey.localServerBaseURL) ?? "http://localhost:11434/v1"
+        localServerModel = defaults.string(forKey: SettingsKey.localServerModel) ?? ""
+        openAIModel = defaults.string(forKey: SettingsKey.openAIModel) ?? "gpt-4o-mini"
+        azureOpenAIEndpoint = defaults.string(forKey: SettingsKey.azureOpenAIEndpoint) ?? ""
+        azureOpenAIDeployment = defaults.string(forKey: SettingsKey.azureOpenAIDeployment) ?? ""
+        azureOpenAIAPIVersion = defaults.string(forKey: SettingsKey.azureOpenAIAPIVersion) ?? "2024-10-21"
+        anthropicModel = defaults.string(forKey: SettingsKey.anthropicModel) ?? "claude-haiku-4-5"
+
+        // Transcription
+        if let raw = defaults.string(forKey: SettingsKey.transcriptionProvider),
+           let provider = TranscriptionProviderChoice(rawValue: raw)
+        {
+            transcriptionProvider = provider
+        }
+        openAITranscriptionModel = defaults.string(forKey: SettingsKey.openAITranscriptionModel) ?? "whisper-1"
+        azureWhisperDeployment = defaults.string(forKey: SettingsKey.azureWhisperDeployment) ?? ""
+        successfulDictationCount = defaults.integer(forKey: SettingsKey.successfulDictationCount)
+        refinementNudgeDismissed = defaults.bool(forKey: SettingsKey.refinementNudgeDismissed)
+        destinationAwareRefinement = defaults.object(forKey: SettingsKey.destinationAwareRefinement) as? Bool ?? true
+        contextLocalOnly = defaults.object(forKey: SettingsKey.contextLocalOnly) as? Bool ?? true
+        historyEnabled = defaults.object(forKey: SettingsKey.historyEnabled) as? Bool ?? true
+        historyRetentionDays = defaults.object(forKey: SettingsKey.historyRetentionDays) as? Int ?? 30
+        vocabularyBoostingEnabled = defaults.bool(forKey: SettingsKey.vocabularyBoostingEnabled)
+
+        // API keys
+        openAIKey = KeychainHelper.load(service: Self.openAIKeychainService, account: Self.keychainAccount) ?? ""
+        azureOpenAIKey = KeychainHelper.load(service: Self.azureKeychainService, account: Self.keychainAccount) ?? ""
+        anthropicKey = KeychainHelper.load(service: Self.anthropicKeychainService, account: Self.keychainAccount) ?? ""
+        localServerKey = KeychainHelper.load(service: Self.localServerKeychainService, account: Self.keychainAccount) ?? ""
+
+        migrateLegacyEnhanceSettings()
 
         if let style = load(RecordingWindowStyle.self, forKey: SettingsKey.recordingWindowStyle) {
             recordingWindowStyle = style
@@ -279,9 +438,32 @@ final class AppSettings {
         if defaults.object(forKey: SettingsKey.hasCompletedOnboarding) != nil {
             hasCompletedOnboarding = defaults.bool(forKey: SettingsKey.hasCompletedOnboarding)
         }
+    }
 
-        if let uuidString = defaults.string(forKey: SettingsKey.selectedModeID) {
-            selectedModeID = UUID(uuidString: uuidString)
+    /// One-time migration of the old enhance-mode configuration (which was
+    /// Azure OpenAI) into the Azure refinement fields and Keychain service.
+    private func migrateLegacyEnhanceSettings() {
+        let legacyEndpoint = defaults.string(forKey: SettingsKey.enhanceEndpoint) ?? ""
+        guard azureOpenAIEndpoint.isEmpty, !legacyEndpoint.isEmpty else { return }
+
+        // Old UI suggested endpoints like ".../openai/v1"; the Azure client
+        // appends its own path, so strip anything from "/openai" on.
+        var endpoint = legacyEndpoint
+        if let range = endpoint.range(of: "/openai") {
+            endpoint = String(endpoint[..<range.lowerBound])
         }
+        azureOpenAIEndpoint = endpoint
+        azureOpenAIDeployment = defaults.string(forKey: SettingsKey.enhanceModel) ?? ""
+        refinementProvider = .azureOpenAI
+
+        if let legacyKey = KeychainHelper.load(service: Self.legacyKeychainService, account: Self.keychainAccount),
+           !legacyKey.isEmpty
+        {
+            azureOpenAIKey = legacyKey
+            KeychainHelper.delete(service: Self.legacyKeychainService, account: Self.keychainAccount)
+        }
+
+        defaults.removeObject(forKey: SettingsKey.enhanceEndpoint)
+        defaults.removeObject(forKey: SettingsKey.enhanceModel)
     }
 }

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ModelsView: View {
     @Environment(AppState.self) private var appState
+    @Environment(AppSettings.self) private var appSettings
 
     var body: some View {
         ScrollView {
@@ -18,6 +19,8 @@ struct ModelsView: View {
 
                 // Model Cards
                 VStack(spacing: 16) {
+                    transcriptionProviderCard
+
                     ForEach(appState.availableModels) { model in
                         modelCard(model)
                     }
@@ -31,6 +34,48 @@ struct ModelsView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.windowBackgroundColor))
+    }
+
+    // MARK: - Transcription Provider
+
+    private var transcriptionProviderCard: some View {
+        @Bindable var settings = appSettings
+
+        return GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Transcription Provider")
+                    .font(.title3.weight(.semibold))
+
+                Picker("Speech-to-Text", selection: $settings.transcriptionProvider) {
+                    ForEach(TranscriptionProviderChoice.allCases) { choice in
+                        Text(choice.displayName).tag(choice)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+
+                switch appSettings.transcriptionProvider {
+                case .parakeet:
+                    Text("Runs fully on-device. No network, no API key.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                case .openAI:
+                    TextField("Model", text: $settings.openAITranscriptionModel)
+                        .textFieldStyle(.roundedBorder)
+                    Text("whisper-1, gpt-4o-transcribe, or gpt-4o-mini-transcribe. Uses the OpenAI API key from Configuration > AI Refinement. Falls back to Parakeet on failure.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                case .azureWhisper:
+                    TextField("Whisper Deployment Name", text: $settings.azureWhisperDeployment)
+                        .textFieldStyle(.roundedBorder)
+                    Text("Uses the Azure endpoint, API key, and API version from Configuration > AI Refinement. Falls back to Parakeet on failure.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(4)
+        }
     }
 
     // MARK: - Model Card
@@ -232,5 +277,6 @@ struct ModelsView: View {
 #Preview {
     ModelsView()
         .environment(AppState())
+        .environment(AppSettings())
         .frame(width: 500, height: 600)
 }

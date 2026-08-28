@@ -2,6 +2,7 @@ import SwiftUI
 
 struct VocabularyView: View {
     @Environment(AppState.self) private var appState
+    @Environment(AppSettings.self) private var appSettings
     @State private var searchText = ""
     @State private var showingAddSheet = false
 
@@ -20,6 +21,11 @@ struct VocabularyView: View {
         VStack(spacing: 0) {
             // Header
             header
+
+            Divider()
+
+            // Recognizer boosting toggle
+            boostingBar
 
             Divider()
 
@@ -46,6 +52,12 @@ struct VocabularyView: View {
                 }
             )
         }
+        .onChange(of: appState.vocabularyEntries) { _, _ in
+            // Keep recognizer boosting in sync with vocabulary edits.
+            if appSettings.vocabularyBoostingEnabled {
+                appState.refreshVocabularyBoosting()
+            }
+        }
     }
 
     // MARK: - Header
@@ -71,6 +83,24 @@ struct VocabularyView: View {
             .controlSize(.regular)
         }
         .padding(20)
+    }
+
+    // MARK: - Boosting Bar
+
+    private var boostingBar: some View {
+        @Bindable var settings = appSettings
+        return VStack(alignment: .leading, spacing: 4) {
+            Toggle("Boost these terms in the recognizer", isOn: $settings.vocabularyBoostingEnabled)
+                .onChange(of: settings.vocabularyBoostingEnabled) { _, _ in
+                    appState.refreshVocabularyBoosting()
+                }
+            Text("Biases on-device recognition toward your terms so they are transcribed correctly, not just replaced afterward. Downloads an additional recognizer model (~110M parameters) the first time you enable it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
     }
 
     // MARK: - Search Bar

@@ -47,15 +47,25 @@ struct RecordingOverlayView: View {
     private var classicOverlay: some View {
         VStack(spacing: 16) {
             // Mode Label
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(Color.red)
-                    .frame(width: 8, height: 8)
-                    .modifier(PulseModifier())
+            VStack(spacing: 4) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 8, height: 8)
+                        .modifier(PulseModifier())
 
-                Text(appState.currentMode?.name ?? "Recording")
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.primary)
+                    Text(appState.currentMode?.name ?? "Recording")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.primary)
+                }
+
+                // Destination-aware refinement target.
+                if let destination = appState.destinationLabel {
+                    Label(destination, systemImage: "scope")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
 
             // Waveform

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct ModesView: View {
@@ -131,12 +132,11 @@ struct ModesView: View {
                         .lineLimit(1)
                 }
 
-                HStack(spacing: 12) {
-                    Label(mode.voiceModelVersion, systemImage: "cpu")
-                    Label(mode.language, systemImage: "globe")
+                if let apps = mode.appBundleIDs, !apps.isEmpty {
+                    Label("\(apps.count) app\(apps.count == 1 ? "" : "s")", systemImage: "app.badge")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                 }
-                .font(.caption)
-                .foregroundStyle(.tertiary)
             }
 
             Spacer()
@@ -198,16 +198,8 @@ struct ModeEditSheet: View {
 
     @State private var name: String = ""
     @State private var description: String = ""
-    @State private var voiceModelVersion: String = "v3"
-    @State private var language: String = "auto"
-
-    private let availableLanguages = [
-        "English", "Spanish", "French", "German", "Italian",
-        "Portuguese", "Dutch", "Polish", "Russian", "Chinese",
-        "Japanese", "Korean", "Arabic", "Hindi", "Turkish",
-        "Vietnamese", "Thai", "Indonesian", "Malay", "Swedish",
-        "Norwegian", "Danish", "Finnish", "Czech", "Ukrainian",
-    ]
+    @State private var refinementPrompt: String = ""
+    @State private var appBundleIDs: [String] = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -233,17 +225,44 @@ struct ModeEditSheet: View {
                     TextField("Description", text: $description)
                 }
 
-                Section("Voice Settings") {
-                    Picker("Voice Model", selection: $voiceModelVersion) {
-                        Text("v3").tag("v3")
-                    }
-
-                    Picker("Language", selection: $language) {
-                        Text("Auto Detect").tag("auto")
-                        ForEach(availableLanguages, id: \.self) { lang in
-                            Text(lang).tag(lang)
+                Section("Auto-select in apps") {
+                    ForEach(appBundleIDs, id: \.self) { bundleID in
+                        HStack(spacing: 8) {
+                            appIcon(for: bundleID)
+                                .frame(width: 18, height: 18)
+                            Text(appDisplayName(for: bundleID))
+                            Spacer()
+                            Button {
+                                appBundleIDs.removeAll { $0 == bundleID }
+                            } label: {
+                                Image(systemName: "minus.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
+
+                    Menu("Add App...") {
+                        ForEach(runningApps(), id: \.bundleID) { app in
+                            Button(app.name) { addApp(app.bundleID) }
+                        }
+                        Divider()
+                        Button("Choose from Applications...") { chooseApp() }
+                    }
+
+                    Text("Dictating into these apps automatically uses this mode.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("AI Refinement") {
+                    TextEditor(text: $refinementPrompt)
+                        .font(.callout)
+                        .frame(minHeight: 60)
+
+                    Text("Directive used when refining transcripts in this mode, e.g. \"Format as a professional email\". Leave empty for the default cleanup directive.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .formStyle(.grouped)
@@ -259,13 +278,14 @@ struct ModeEditSheet: View {
                 .keyboardShortcut(.cancelAction)
 
                 Button(mode == nil ? "Add" : "Save") {
+                    let trimmedPrompt = refinementPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
                     let savedMode = Mode(
                         id: mode?.id ?? UUID(),
                         name: name,
                         description: description,
-                        voiceModelVersion: voiceModelVersion,
-                        language: language,
-                        isDefault: mode?.isDefault ?? false
+                        isDefault: mode?.isDefault ?? false,
+                        refinementPrompt: trimmedPrompt.isEmpty ? nil : trimmedPrompt,
+                        appBundleIDs: appBundleIDs.isEmpty ? nil : appBundleIDs
                     )
                     onSave(savedMode)
                     dismiss()
@@ -276,14 +296,64 @@ struct ModeEditSheet: View {
             }
             .padding(20)
         }
-        .frame(width: 450, height: 400)
+        .frame(width: 450, height: 540)
         .onAppear {
             if let mode = mode {
                 name = mode.name
                 description = mode.description
-                voiceModelVersion = mode.voiceModelVersion
-                language = mode.language
+                refinementPrompt = mode.refinementPrompt ?? ""
+                appBundleIDs = mode.appBundleIDs ?? []
             }
+        }
+    }
+
+    // MARK: - App Assignment Helpers
+
+    private struct RunningApp { let name: String; let bundleID: String }
+
+    private func runningApps() -> [RunningApp] {
+        NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+            .compactMap { app in
+                guard let id = app.bundleIdentifier, let name = app.localizedName else { return nil }
+                return RunningApp(name: name, bundleID: id)
+            }
+            .filter { !appBundleIDs.contains($0.bundleID) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private func addApp(_ bundleID: String) {
+        guard !appBundleIDs.contains(bundleID) else { return }
+        appBundleIDs.append(bundleID)
+    }
+
+    private func chooseApp() {
+        let panel = NSOpenPanel()
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.allowedContentTypes = [.application]
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url,
+           let id = Bundle(url: url)?.bundleIdentifier {
+            addApp(id)
+        }
+    }
+
+    private func appDisplayName(for bundleID: String) -> String {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID),
+           let name = Bundle(url: url)?
+            .object(forInfoDictionaryKey: "CFBundleName") as? String {
+            return name
+        }
+        return bundleID
+    }
+
+    @ViewBuilder
+    private func appIcon(for bundleID: String) -> some View {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+                .resizable()
+        } else {
+            Image(systemName: "app.dashed").resizable().foregroundStyle(.secondary)
         }
     }
 }

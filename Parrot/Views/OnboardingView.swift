@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct OnboardingView: View {
@@ -5,6 +6,10 @@ struct OnboardingView: View {
     @Environment(AppSettings.self) private var appSettings
     @State private var currentStep: OnboardingStep = .welcome
     @State private var inputMonitoringTimer: Timer?
+    @State private var accessibilityTimer: Timer?
+    @State private var scratchpadText: String = ""
+    @State private var hotkeyProbe: HotkeyProbe?
+    @State private var hotkeyDetected = false
 
     /// Called when the user completes onboarding. The host (AppDelegate)
     /// uses this to close the onboarding window and show the main window.
@@ -30,8 +35,12 @@ struct OnboardingView: View {
                         microphoneStep
                     case .inputMonitoring:
                         inputMonitoringStep
+                    case .accessibility:
+                        accessibilityStep
                     case .modelDownload:
                         modelDownloadStep
+                    case .tryIt:
+                        tryItStep
                     }
                 }
                 .transition(.asymmetric(
@@ -50,14 +59,26 @@ struct OnboardingView: View {
         .background(Color(.windowBackgroundColor))
         .animation(.easeInOut(duration: 0.3), value: currentStep)
         .onAppear {
-            // Ensure PermissionsManager is available for permission steps
+            // Ensure PermissionsManager is available for permission steps.
             if appState.permissionsManager == nil {
                 appState.initPermissionsManager()
             }
+            // Start the ~800 MB model download now so it is ready (or nearly
+            // so) by the time the user reaches the Model step.
+            appState.beginModelPreparation()
+            configureStep(currentStep)
+        }
+        .onChange(of: currentStep) { _, newStep in
+            configureStep(newStep)
         }
         .onDisappear {
             inputMonitoringTimer?.invalidate()
             inputMonitoringTimer = nil
+            accessibilityTimer?.invalidate()
+            accessibilityTimer = nil
+            appState.stopInputMonitoring()
+            hotkeyProbe?.stop()
+            hotkeyProbe = nil
         }
     }
 
@@ -120,8 +141,12 @@ struct OnboardingView: View {
             return appState.microphonePermissionGranted
         case .inputMonitoring:
             return appState.inputMonitoringPermissionGranted
+        case .accessibility:
+            return appState.accessibilityPermissionGranted
         case .modelDownload:
             return appState.isModelReady
+        case .tryIt:
+            return !scratchpadText.isEmpty
         }
     }
 
@@ -129,8 +154,10 @@ struct OnboardingView: View {
         switch step {
         case .welcome: return "Welcome"
         case .microphonePermission: return "Microphone"
-        case .inputMonitoring: return "Input"
+        case .inputMonitoring: return "Hotkey"
+        case .accessibility: return "Paste"
         case .modelDownload: return "Model"
+        case .tryIt: return "Try it"
         }
     }
 
@@ -138,22 +165,8 @@ struct OnboardingView: View {
 
     private var welcomeStep: some View {
         VStack(spacing: 24) {
-            // App Icon
-            ZStack {
-                RoundedRectangle(cornerRadius: 24)
-                    .fill(
-                        LinearGradient(
-                            colors: [Color.green, Color.teal],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 96, height: 96)
-
-                Image(systemName: "waveform")
-                    .font(.system(size: 40, weight: .medium))
-                    .foregroundStyle(.white)
-            }
+            // App Icon (real bundle icon when available, gradient glyph otherwise)
+            appIconView
 
             VStack(spacing: 8) {
                 Text("Welcome to Parrot")
@@ -171,6 +184,33 @@ struct OnboardingView: View {
                 featureRow(icon: "lock.shield", text: "Your audio never leaves your Mac")
             }
             .padding(.top, 8)
+        }
+    }
+
+    /// The installed app icon, falling back to a gradient waveform glyph when
+    /// running before the bundle icon is available (e.g. SwiftUI previews).
+    @ViewBuilder
+    private var appIconView: some View {
+        if let icon = NSApp.applicationIconImage {
+            Image(nsImage: icon)
+                .resizable()
+                .frame(width: 96, height: 96)
+        } else {
+            ZStack {
+                RoundedRectangle(cornerRadius: 24)
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.green, Color.teal],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 96, height: 96)
+
+                Image(systemName: "waveform")
+                    .font(.system(size: 40, weight: .medium))
+                    .foregroundStyle(.white)
+            }
         }
     }
 
@@ -211,9 +251,16 @@ struct OnboardingView: View {
             }
 
             if appState.microphonePermissionGranted {
-                Label("Microphone access granted", systemImage: "checkmark.circle.fill")
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.green)
+                VStack(spacing: 10) {
+                    Label("Microphone access granted", systemImage: "checkmark.circle.fill")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.green)
+
+                    micLevelMeter
+                    Text("Say something and watch it react.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
             } else {
                 Button {
                     requestMicrophonePermission()
@@ -227,6 +274,20 @@ struct OnboardingView: View {
         }
     }
 
+    /// A simple horizontal bar reflecting the live input level (0...1).
+    private var micLevelMeter: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color(.separatorColor).opacity(0.4))
+                Capsule()
+                    .fill(LinearGradient(colors: [.green, .teal], startPoint: .leading, endPoint: .trailing))
+                    .frame(width: geo.size.width * CGFloat(min(1, max(0, appState.inputLevel))))
+                    .animation(.easeOut(duration: 0.08), value: appState.inputLevel)
+            }
+        }
+        .frame(width: 220, height: 8)
+    }
+
     // MARK: - Step 3: Input Monitoring
 
     private var inputMonitoringStep: some View {
@@ -238,22 +299,25 @@ struct OnboardingView: View {
             )
 
             VStack(spacing: 8) {
-                Text("Input Monitoring")
+                Text("Your dictation key")
                     .font(.title.weight(.bold))
 
                 Text(
-                    "Parrot needs Input Monitoring permission to detect keyboard shortcuts for recording."
+                    "Parrot watches for one key: \(appState.toggleRecordingHotkey.displayName). Grant Input Monitoring, then hold the key to test it."
                 )
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 340)
+                .frame(maxWidth: 360)
             }
 
-            if appState.inputMonitoringPermissionGranted {
-                Label("Input monitoring enabled", systemImage: "checkmark.circle.fill")
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.green)
+            if hotkeyDetected || appState.inputMonitoringPermissionGranted {
+                Label(
+                    hotkeyDetected ? "Key detected. You are set." : "Input monitoring enabled",
+                    systemImage: "checkmark.circle.fill"
+                )
+                .font(.callout.weight(.medium))
+                .foregroundStyle(.green)
             } else {
                 VStack(spacing: 12) {
                     Button {
@@ -265,17 +329,67 @@ struct OnboardingView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
 
-                    Text(
-                        "Enable Parrot in Privacy & Security > Input Monitoring"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    Text("Enable Parrot in Privacy & Security > Input Monitoring, then hold \(appState.toggleRecordingHotkey.displayName) to confirm.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 320)
                 }
             }
         }
     }
 
-    // MARK: - Step 4: Model Download
+    // MARK: - Step 4: Accessibility (Auto-paste)
+
+    private var accessibilityStep: some View {
+        VStack(spacing: 24) {
+            permissionIcon(
+                systemName: "doc.on.clipboard",
+                color: .orange,
+                granted: appState.accessibilityPermissionGranted
+            )
+
+            VStack(spacing: 8) {
+                Text("Auto-paste")
+                    .font(.title.weight(.bold))
+
+                Text(
+                    "After transcribing, Parrot presses Cmd+V for you so text lands at your cursor. macOS calls this Accessibility access."
+                )
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 360)
+            }
+
+            if appState.accessibilityPermissionGranted {
+                Label("Auto-paste enabled", systemImage: "checkmark.circle.fill")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.green)
+            } else {
+                VStack(spacing: 12) {
+                    Button {
+                        requestAccessibility()
+                    } label: {
+                        Text("Grant Access")
+                            .frame(width: 160)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+
+                    Text(
+                        "Enable Parrot in Privacy & Security > Accessibility. Used for one thing: pasting your dictation. Skip it and Parrot copies to your clipboard instead."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 340)
+                }
+            }
+        }
+    }
+
+    // MARK: - Step 5: Model Download
 
     private var modelDownloadStep: some View {
         VStack(spacing: 24) {
@@ -355,6 +469,82 @@ struct OnboardingView: View {
         }
     }
 
+    // MARK: - Step 6: Try It
+
+    private var tryItStep: some View {
+        VStack(spacing: 20) {
+            VStack(spacing: 8) {
+                Text("Try it out")
+                    .font(.title.weight(.bold))
+
+                Text(tryItInstruction)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 380)
+            }
+
+            // Live recording indicator.
+            HStack(spacing: 8) {
+                switch appState.recordingState {
+                case .recording:
+                    Circle().fill(Color.red).frame(width: 8, height: 8)
+                    Text("Listening...").foregroundStyle(.red)
+                case .processing:
+                    ProgressView().controlSize(.small)
+                    Text("Transcribing...").foregroundStyle(.secondary)
+                case .idle:
+                    Image(systemName: scratchpadText.isEmpty ? "keyboard" : "checkmark.circle.fill")
+                        .foregroundStyle(scratchpadText.isEmpty ? Color.secondary : Color.green)
+                    Text(scratchpadText.isEmpty ? "Ready when you are" : "That works in every app")
+                        .foregroundStyle(scratchpadText.isEmpty ? Color.secondary : Color.green)
+                }
+            }
+            .font(.callout.weight(.medium))
+            .frame(height: 20)
+
+            // Scratchpad the dictation pastes into.
+            TextEditor(text: $scratchpadText)
+                .font(.body)
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .frame(height: 120)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color(.textBackgroundColor))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(Color(.separatorColor), lineWidth: 1)
+                )
+
+            // Diagnose the paste-failure case inline.
+            if !scratchpadText.isEmpty {
+                Label("Nice. You are all set.", systemImage: "sparkles")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            } else if appState.lastTranscription != nil && !appState.accessibilityPermissionGranted {
+                VStack(spacing: 6) {
+                    Text("Transcribed, but could not paste. Your text is on the clipboard (press Cmd+V). Grant Accessibility to enable auto-paste.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 360)
+                    Button("Fix Accessibility") {
+                        currentStep = .accessibility
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                }
+            }
+        }
+    }
+
+    private var tryItInstruction: String {
+        let key = appState.toggleRecordingHotkey.displayName
+        return "Click the box below, then hold \(key) and say: testing Parrot one two three. Let go and watch it appear."
+    }
+
     // MARK: - Permission Icon Helper
 
     private func permissionIcon(systemName: String, color: Color, granted: Bool) -> some View {
@@ -391,7 +581,7 @@ struct OnboardingView: View {
             Spacer()
 
             // Next / Get Started
-            if currentStep == .modelDownload {
+            if currentStep == OnboardingStep.allCases.last {
                 Button {
                     completeOnboarding()
                 } label: {
@@ -422,8 +612,16 @@ struct OnboardingView: View {
             return appState.microphonePermissionGranted
         case .inputMonitoring:
             return appState.inputMonitoringPermissionGranted
+        case .accessibility:
+            // Skippable: clipboard-only is a valid degraded mode.
+            return true
         case .modelDownload:
             return appState.isModelReady
+        case .tryIt:
+            // Never trap the user: Finish is always available here. A
+            // successful dictation is celebrated but not required (paste may
+            // be intentionally skipped in the Accessibility step).
+            return true
         }
     }
 
@@ -450,13 +648,9 @@ struct OnboardingView: View {
     // MARK: - Permission Actions
 
     private func requestMicrophonePermission() {
-        Task {
-            guard let permissions = appState.permissionsManager else { return }
-            let granted = await permissions.requestMicrophoneAccess()
-            await MainActor.run {
-                appState.microphonePermissionGranted = granted
-            }
-        }
+        // Trigger the prompt by starting the audio engine (reliable on
+        // self-signed builds), not AVCaptureDevice.requestAccess which can hang.
+        appState.startOnboardingMicMonitoring()
     }
 
     private func openInputMonitoringSettings() {
@@ -483,6 +677,72 @@ struct OnboardingView: View {
                     appState.inputMonitoringPermissionGranted = true
                     inputMonitoringTimer?.invalidate()
                     inputMonitoringTimer = nil
+                }
+            }
+        }
+    }
+
+    /// Starts and stops per-step live affordances (mic meter, hotkey probe) as
+    /// the user moves through the wizard.
+    private func configureStep(_ step: OnboardingStep) {
+        // Mic level meter: only while on the microphone step.
+        if step == .microphonePermission {
+            if !appState.microphonePermissionGranted {
+                appState.startOnboardingMicMonitoring()
+            } else {
+                appState.startInputMonitoring()
+            }
+        } else {
+            appState.stopInputMonitoring()
+        }
+
+        // Functional hotkey probe: only while on the hotkey step.
+        if step == .inputMonitoring {
+            startHotkeyProbe()
+        } else {
+            hotkeyProbe?.stop()
+            hotkeyProbe = nil
+        }
+    }
+
+    private func startHotkeyProbe() {
+        hotkeyDetected = false
+        hotkeyProbe?.stop()
+        let probe = HotkeyProbe(targetKeyCode: Int(appState.toggleRecordingHotkey.keyCode))
+        probe.onDetected = {
+            hotkeyDetected = true
+            // A live press is the strongest proof the key is detectable.
+            appState.inputMonitoringPermissionGranted = true
+        }
+        probe.start()
+        hotkeyProbe = probe
+    }
+
+    private func requestAccessibility() {
+        guard let permissions = appState.permissionsManager else {
+            if let url = URL(
+                string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+            ) {
+                NSWorkspace.shared.open(url)
+            }
+            return
+        }
+        // Show the AX trust prompt and deep-link straight to the pane; AX trust
+        // has no completion callback, so poll until it flips.
+        permissions.requestAccessibilityAccess()
+        permissions.openSystemPreferences(for: .accessibility)
+        startAccessibilityPolling()
+    }
+
+    private func startAccessibilityPolling() {
+        accessibilityTimer?.invalidate()
+        accessibilityTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            Task { @MainActor in
+                guard let permissions = appState.permissionsManager else { return }
+                if permissions.checkAccessibilityPermission() {
+                    appState.accessibilityPermissionGranted = true
+                    accessibilityTimer?.invalidate()
+                    accessibilityTimer = nil
                 }
             }
         }
