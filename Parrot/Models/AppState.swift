@@ -635,6 +635,8 @@ final class AppState {
                 NSSound(named: "Tink")?.play()
             }
 
+            RecordingOverlayPanel.show(appState: self)
+
             diagLog("[Parrot:AppState] Recording STARTED")
         } catch {
             currentStatus = .error("Recording failed: \(error.localizedDescription)")
@@ -681,6 +683,7 @@ final class AppState {
 
         guard !samples.isEmpty else {
             diagLog("[Parrot:AppState] No samples captured — skipping transcription")
+            RecordingOverlayPanel.hide()
             recordingState = .idle
             currentStatus = .idle
             startInputMonitoring()
@@ -690,6 +693,7 @@ final class AppState {
         // Minimum ~0.3s of audio needed for reliable transcription.
         guard durationSec >= 0.3 else {
             diagLog("[Parrot:AppState] Recording too short (\(String(format: "%.1f", durationSec))s) — skipping transcription")
+            RecordingOverlayPanel.hide()
             recordingState = .idle
             currentStatus = .idle
             startInputMonitoring()
@@ -770,6 +774,7 @@ final class AppState {
                 // is skipped and the user is told, never a silent failure.
                 let pasted = await TextInserter.insertText(text)
                 diagLog("[Parrot:AppState] Text inserted, pasted=\(pasted)")
+                RecordingOverlayPanel.hide()
                 if !pasted {
                     self.showTransientError(
                         "Copied to clipboard. Grant Accessibility to auto-paste (press Cmd+V to paste now)."
@@ -781,6 +786,7 @@ final class AppState {
 
             } catch {
                 diagLog("[Parrot:AppState] Transcription FAILED: \(error)")
+                RecordingOverlayPanel.hide()
                 self.recordingState = .idle
                 self.currentStatus = .error("Transcription failed: \(error.localizedDescription)")
                 self.errorMessage = error.localizedDescription
@@ -891,6 +897,7 @@ final class AppState {
     func cancelRecording() {
         guard isRecording, let recorder = audioRecorder else { return }
         _ = recorder.stopRecording()
+        RecordingOverlayPanel.hide()
         isRecording = false
         recordingState = .idle
         currentStatus = .idle

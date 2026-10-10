@@ -222,9 +222,47 @@ struct RecordingOverlayView: View {
     // MARK: - Actions
 
     private func cancelRecording() {
-        appState.recordingState = .idle
-        appState.recordingDuration = 0
-        appState.waveformAmplitudes = []
+        // Stops the recorder too, not just the UI state, and hides this panel.
+        appState.cancelRecording()
+    }
+}
+
+// MARK: - Overlay Panel
+
+/// Presents `RecordingOverlayView` in a non-activating floating panel while a
+/// dictation records and processes. The panel never becomes key or active, so
+/// focus stays in the app the text is going to.
+@MainActor
+enum RecordingOverlayPanel {
+
+    private static var panel: FloatingPanel?
+
+    static func show(appState: AppState) {
+        hide()
+        guard appState.recordingWindowStyle != .none else { return }
+
+        // Padding leaves room for the view's own shadow inside the panel.
+        let hosting = NSHostingView(rootView: RecordingOverlayView().padding(12).environment(appState))
+        let size = hosting.fittingSize
+        hosting.frame.size = size
+
+        let newPanel = FloatingPanel(contentRect: NSRect(origin: .zero, size: size))
+        newPanel.contentView = hosting
+        newPanel.isReleasedWhenClosed = false
+
+        // Bottom center of the active screen, above the Dock.
+        if let screen = NSScreen.main {
+            let frame = screen.visibleFrame
+            newPanel.setFrameOrigin(NSPoint(x: frame.midX - size.width / 2, y: frame.minY + 60))
+        }
+
+        newPanel.orderFrontRegardless()
+        panel = newPanel
+    }
+
+    static func hide() {
+        panel?.close()
+        panel = nil
     }
 }
 
