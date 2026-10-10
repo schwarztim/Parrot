@@ -75,6 +75,8 @@ cat > "$APP_DIR/Contents/Info.plist" << PLIST
     <string>Parrot needs microphone access to record your voice for transcription.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Parrot uses Apple Events to pause Music and Spotify while you dictate and to run the scripts you attach to modes.</string>
+    <key>NSContactsUsageDescription</key>
+    <string>Parrot can include your name, email and phone from your Contacts card when a mode asks for it, so the AI can sign messages for you.</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>
