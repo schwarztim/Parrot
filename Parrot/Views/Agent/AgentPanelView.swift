@@ -264,9 +264,9 @@ struct AgentPermissionView: View {
             HStack {
                 Menu("More") {
                     if permission?.canUpdatePermissions ?? false {
-                        Button("Always Allow") {
-                            Task { await bridge.respond(.allowAlways, suggestionIndex: permission?.suggestions.isEmpty == false ? 0 : nil) }
-                        }
+                        // No index: the helper saves the first allow rule it
+                        // was offered, never a mode change.
+                        Button("Always Allow") { Task { await bridge.respond(.allowAlways) } }
                         Button("Allow for This Session") { Task { await bridge.respond(.allowSession) } }
                     }
                     Button("Bypass Permissions for This Session") { Task { await bridge.respond(.bypass) } }

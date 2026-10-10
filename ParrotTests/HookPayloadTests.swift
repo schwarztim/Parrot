@@ -287,6 +287,16 @@ final class HookPayloadTests: XCTestCase {
         let bypass = HookDecision.permissionUpdate(input: input, response: AgentHookResponse(requestId: "r", action: .bypass))
         XCTAssertEqual(bypass?.compactText, #"{"destination":"session","mode":"bypassPermissions","type":"setMode"}"#)
 
+        // Without an index, "always allow" skips a mode suggestion and
+        // saves the first allow rule.
+        var mixed = input
+        mixed.permissionSuggestions = [
+            .object(["type": .string("setMode"), "mode": .string("acceptEdits"), "destination": .string("session")]),
+        ] + (input.permissionSuggestions ?? [])
+        let rule = HookDecision.permissionUpdate(input: mixed, response: AgentHookResponse(requestId: "r", action: .allowAlways))
+        XCTAssertEqual(rule?["type"]?.stringValue, "addRules")
+        XCTAssertEqual(rule?["destination"]?.stringValue, "localSettings")
+
         // No suggestions (file edit dialogs send none): a whole-tool rule.
         var edit = input
         edit.toolName = "Edit"
