@@ -84,6 +84,11 @@ extension HotkeyBinding: Codable {
 // MARK: - HotkeySettings
 
 /// Global shortcut bindings. [TRG]
+///
+/// The named shortcuts (`ShortcutName`) are saved one JSON value per name
+/// under `parrot.hotkeys.<name>`; a missing value means the built-in
+/// default. `hotkeyBinding` is the pre-registry key and mirrors Push to Talk
+/// both ways, so older readers (onboarding) always show the live key.
 @Observable
 final class HotkeySettings {
 
@@ -91,20 +96,37 @@ final class HotkeySettings {
         static let hotkeyBinding = "parrot.hotkeyBinding"
         static let cancelHotkeyBinding = "parrot.cancelHotkeyBinding"
         static let pushToTalkBinding = "parrot.pushToTalkBinding"
+        static let migrated = "parrot.hotkeys.migrated"
     }
 
-    /// The dictation hotkey (hold to talk).
+    /// The dictation hotkey from before the registry; mirrors Push to Talk.
     var hotkeyBinding: HotkeyBinding {
-        didSet { store.setEncoded(hotkeyBinding, forKey: Key.hotkeyBinding) }
+        didSet {
+            store.setEncoded(hotkeyBinding, forKey: Key.hotkeyBinding)
+            let mirrored = Shortcut(legacy: hotkeyBinding) ?? .none
+            if !Self.sameInput(mirrored, shortcut(for: .pushToTalk)) {
+                setShortcut(mirrored, for: .pushToTalk)
+            }
+        }
     }
 
     var cancelHotkeyBinding: HotkeyBinding? {
         didSet { store.setEncoded(cancelHotkeyBinding, forKey: Key.cancelHotkeyBinding) }
     }
 
+    /// Saved by an older recorder that nothing listened to. Kept for reading.
     var pushToTalkBinding: HotkeyBinding? {
         didSet { store.setEncoded(pushToTalkBinding, forKey: Key.pushToTalkBinding) }
     }
+
+    /// True once the pre-registry bindings were carried over (see
+    /// `migrateIfNeeded(hasCompletedOnboarding:)`).
+    var migrated: Bool {
+        didSet { store.set(migrated, forKey: Key.migrated) }
+    }
+
+    /// Saved bindings by name. Names without an entry use their default.
+    private(set) var savedShortcuts: [ShortcutName: Shortcut]
 
     private let store: SettingsStore
 
@@ -112,6 +134,98 @@ final class HotkeySettings {
         hotkeyBinding = store.decoded(HotkeyBinding.self, forKey: Key.hotkeyBinding) ?? .defaultHotkey
         cancelHotkeyBinding = store.decoded(HotkeyBinding.self, forKey: Key.cancelHotkeyBinding)
         pushToTalkBinding = store.decoded(HotkeyBinding.self, forKey: Key.pushToTalkBinding)
+        migrated = store.bool(Key.migrated, default: false)
+        var saved: [ShortcutName: Shortcut] = [:]
+        for name in ShortcutName.allCases {
+            if let shortcut = store.decoded(Shortcut.self, forKey: name.defaultsKey) {
+                saved[name] = shortcut
+            }
+        }
+        savedShortcuts = saved
         self.store = store
+    }
+
+    // MARK: - Named Shortcuts
+
+    /// The binding in effect for `name`: the saved one, else (before
+    /// migration) the pre-registry key, else the default. `.none` when removed.
+    func shortcut(for name: ShortcutName) -> Shortcut {
+        if let saved = savedShortcuts[name] { return saved }
+        if !migrated, let legacy = legacyShortcut(for: name) { return legacy }
+        return name.defaultShortcut
+    }
+
+    /// Every name's binding in effect.
+    var allShortcuts: [ShortcutName: Shortcut] {
+        Dictionary(uniqueKeysWithValues: ShortcutName.allCases.map { ($0, shortcut(for: $0)) })
+    }
+
+    /// Saves a binding. Pass `.none` to remove it.
+    func setShortcut(_ shortcut: Shortcut, for name: ShortcutName) {
+        savedShortcuts[name] = shortcut
+        store.setEncoded(shortcut, forKey: name.defaultsKey)
+        if name == .pushToTalk { mirrorToLegacy(shortcut) }
+    }
+
+    /// Goes back to the built-in default.
+    func resetShortcut(_ name: ShortcutName) {
+        savedShortcuts[name] = nil
+        store.remove(name.defaultsKey)
+        if name == .pushToTalk { mirrorToLegacy(name.defaultShortcut) }
+    }
+
+    /// True when `name` uses its built-in default.
+    func isDefault(_ name: ShortcutName) -> Bool {
+        shortcut(for: name) == name.defaultShortcut
+    }
+
+    // MARK: - Migration
+
+    /// Carries the pre-registry bindings over once. Runs at setup, never in
+    /// init. Existing installs (onboarding finished, or any old binding
+    /// saved) keep their push-to-talk key and cancel key, and do not gain
+    /// the new global Toggle Recording and Change Mode keys they never
+    /// chose. Fresh installs keep every default.
+    func migrateIfNeeded(hasCompletedOnboarding: Bool) {
+        guard !migrated else { return }
+        let existingInstall = hasCompletedOnboarding
+            || store.contains(Key.hotkeyBinding)
+            || store.contains(Key.cancelHotkeyBinding)
+            || store.contains(Key.pushToTalkBinding)
+        if existingInstall {
+            for name in [ShortcutName.pushToTalk, .cancelRecording] where savedShortcuts[name] == nil {
+                if let legacy = legacyShortcut(for: name) { setShortcut(legacy, for: name) }
+            }
+            for name in [ShortcutName.toggleRecording, .changeMode] where savedShortcuts[name] == nil {
+                setShortcut(.none, for: name)
+            }
+        }
+        migrated = true
+    }
+
+    /// The pre-registry binding for `name`, when one was saved and usable.
+    private func legacyShortcut(for name: ShortcutName) -> Shortcut? {
+        switch name {
+        case .pushToTalk:
+            guard store.contains(Key.hotkeyBinding) else { return nil }
+            return Shortcut(legacy: hotkeyBinding)
+        case .cancelRecording:
+            return cancelHotkeyBinding.flatMap { Shortcut(legacy: $0) }
+        default:
+            return nil
+        }
+    }
+
+    private func mirrorToLegacy(_ shortcut: Shortcut) {
+        let legacy = shortcut.legacyBinding ?? .empty
+        if !Self.sameInput(Shortcut(legacy: legacy) ?? .none, Shortcut(legacy: hotkeyBinding) ?? .none) {
+            hotkeyBinding = legacy
+        }
+    }
+
+    /// Same physical input, ignoring double-tap and extra mouse buttons the
+    /// legacy form cannot hold. Stops the two-way mirror from looping.
+    private static func sameInput(_ a: Shortcut, _ b: Shortcut) -> Bool {
+        (a.isEmpty && b.isEmpty) || a.overlaps(b)
     }
 }
