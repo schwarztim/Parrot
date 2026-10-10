@@ -17,15 +17,11 @@ final class CannedTransport: HTTPTransport, @unchecked Sendable {
     }
 
     var requests: [URLRequest] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded
+        lock.withLock { recorded }
     }
 
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        lock.lock()
-        recorded.append(request)
-        lock.unlock()
+        lock.withLock { recorded.append(request) }
         if let error { throw error }
         let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
         return (body, response)
