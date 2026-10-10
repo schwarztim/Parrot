@@ -6,7 +6,10 @@ import Foundation
 /// if the matched text is all-uppercase the replacement is uppercased, and if
 /// the first character is uppercase the replacement is capitalized.
 ///
-/// Persists entries to a JSON file in Application Support.
+/// The single source of truth for vocabulary: the Vocabulary tab edits it
+/// (through `AppState.vocabularyEntries`), and find and replace plus
+/// recognizer boosting read it. Every change is saved to a JSON file in
+/// Application Support.
 @Observable
 final class VocabularyManager {
 
@@ -16,18 +19,23 @@ final class VocabularyManager {
 
     // MARK: - Persistence
 
-    private static var storageURL: URL {
+    private let storageURL: URL
+
+    static func defaultStorageURL() -> URL {
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
         ).first!
-        let dir = appSupport.appendingPathComponent("Parrot", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("vocabulary.json")
+        return appSupport
+            .appendingPathComponent("Parrot", isDirectory: true)
+            .appendingPathComponent("vocabulary.json")
     }
 
     // MARK: - Initialization
 
-    init() {
+    /// - Parameter storageURL: JSON file to load from and save to. Tests pass
+    ///   a temporary file; the app uses the default.
+    init(storageURL: URL = VocabularyManager.defaultStorageURL()) {
+        self.storageURL = storageURL
         load()
     }
 
@@ -57,6 +65,12 @@ final class VocabularyManager {
 
     func moveEntries(from source: IndexSet, to destination: Int) {
         entries.move(fromOffsets: source, toOffset: destination)
+        save()
+    }
+
+    /// Replaces the whole list (the Vocabulary tab edits a copy) and saves.
+    func replaceAll(_ newEntries: [VocabularyEntry]) {
+        entries = newEntries
         save()
     }
 
@@ -166,15 +180,19 @@ final class VocabularyManager {
 
     private func save() {
         do {
+            try FileManager.default.createDirectory(
+                at: storageURL.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
             let data = try JSONEncoder().encode(entries)
-            try data.write(to: Self.storageURL, options: .atomic)
+            try data.write(to: storageURL, options: .atomic)
         } catch {
             // Non-fatal: entries remain in memory.
+            diagLog("[Parrot:Vocab] Saving vocabulary failed: \(error)")
         }
     }
 
     private func load() {
-        let url = Self.storageURL
+        let url = storageURL
         guard FileManager.default.fileExists(atPath: url.path) else { return }
 
         do {

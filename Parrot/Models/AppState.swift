@@ -168,7 +168,12 @@ final class AppState {
 
     // MARK: - Vocabulary
 
-    var vocabularyEntries: [VocabularyEntry] = []
+    /// The vocabulary list, owned and persisted by `vocabularyManager`. Views
+    /// edit it here; every change is saved and applies to the next dictation.
+    var vocabularyEntries: [VocabularyEntry] {
+        get { vocabularyManager.entries }
+        set { vocabularyManager.replaceAll(newValue) }
+    }
 
     // MARK: - Settings (inline, for views that bind directly)
 
@@ -236,7 +241,7 @@ final class AppState {
     private(set) var transcriptionEngine: TranscriptionEngine?
     private(set) var hotkeyManager: HotkeyManager?
     private(set) var textInserter: TextInserter?
-    private(set) var vocabularyManager: VocabularyManager?
+    let vocabularyManager: VocabularyManager
     private(set) var modeManager: ModeManager?
     private(set) var permissionsManager: PermissionsManager?
     private(set) var historyStore: HistoryStore?
@@ -247,7 +252,8 @@ final class AppState {
 
     // MARK: - Initialization
 
-    init() {
+    init(vocabularyManager: VocabularyManager = VocabularyManager()) {
+        self.vocabularyManager = vocabularyManager
         currentMode = modes.first(where: { $0.isDefault })
     }
 
@@ -333,7 +339,7 @@ final class AppState {
 
                 // Configure vocabulary boosting once the model is ready.
                 await engine.configureVocabulary(
-                    entries: self?.vocabularyManager?.entries ?? [],
+                    entries: self?.vocabularyEntries ?? [],
                     enabled: self?.settings?.vocabularyBoostingEnabled ?? false
                 )
 
@@ -514,11 +520,6 @@ final class AppState {
         if let days = settings?.historyRetentionDays, days > 0 {
             try? historyStore?.pruneOlderThan(days: days)
         }
-
-        // Vocabulary manager
-        let vocab = VocabularyManager()
-        self.vocabularyManager = vocab
-        self.vocabularyEntries = vocab.entries
 
         // Mode manager. On first launch, seed the persisted store with the
         // built-in UI modes; afterwards the persisted list is authoritative.
@@ -716,9 +717,7 @@ final class AppState {
                 let rawTranscript = text
 
                 // Apply vocabulary replacements.
-                if let vocab = self.vocabularyManager {
-                    text = vocab.apply(to: text)
-                }
+                text = self.vocabularyManager.apply(to: text)
 
                 // Refine via the configured LLM provider. Any failure falls
                 // back to the raw transcript; dictation is never lost.
