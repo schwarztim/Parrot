@@ -167,7 +167,20 @@ final class AppState {
     ] {
         didSet { modeManager?.replaceAll(modes) }
     }
-    var currentMode: Mode?
+    /// The selected mode. ModeManager is the source of truth once it exists,
+    /// so every writer (hotkeys, URLs, the recorder, the mode list) and every
+    /// reader see the same mode; `launchMode` only covers the moment before
+    /// setup creates the manager.
+    var currentMode: Mode? {
+        get { modeManager?.selectedMode ?? launchMode }
+        set {
+            launchMode = newValue
+            if let newValue, let modeManager, modeManager.selectedMode.id != newValue.id {
+                modeManager.selectMode(newValue)
+            }
+        }
+    }
+    private var launchMode: Mode?
 
     // MARK: - Vocabulary
 

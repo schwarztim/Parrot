@@ -94,9 +94,21 @@ final class RecorderWindowController {
         self.appState = appState
         self.settings = settings
         self.openSoundSettings = openSoundSettings
-        model.actions = makeActions()
+        let actions = makeActions()
+        model.actions = actions
         model.onSizeChange = { [weak self] size in
             self?.fit(to: size)
+        }
+        // The cancel key is a global hot key consumed before any window sees
+        // it, so the recorder takes it over here: the first press asks
+        // "Discard recording?", a second press while that is showing discards.
+        appState.services.hotkeys.cancelHandler = { [weak self] in
+            guard let self else { return }
+            if live.cancelGuardShown {
+                actions.discard()
+            } else {
+                actions.requestCancel()
+            }
         }
         observe()
     }
