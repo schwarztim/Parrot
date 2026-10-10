@@ -14,9 +14,25 @@ final class WindowManager {
     private var onboardingWindow: NSWindow?
     private var mainWindow: NSWindow?
 
+    /// The recorder panel, following the live dictation state from launch.
+    private(set) var recorder: RecorderWindowController?
+
     init(appState: AppState, appSettings: AppSettings) {
         self.appState = appState
         self.appSettings = appSettings
+        recorder = RecorderWindowController.install(appState: appState, settings: appSettings) { [weak self] in
+            self?.showTab(.sound)
+        }
+    }
+
+    /// Opens the main window on `tab` (onboarding instead, if unfinished).
+    func showTab(_ tab: SidebarTab) {
+        guard appSettings.general.hasCompletedOnboarding else {
+            showOnboardingWindow()
+            return
+        }
+        showMainWindow()
+        appState.navigation.request(tab)
     }
 
     /// Opens the main window, or resumes onboarding if it isn't finished.
