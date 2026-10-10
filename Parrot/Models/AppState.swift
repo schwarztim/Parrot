@@ -211,10 +211,6 @@ final class AppState {
     // Sound / Level Monitoring
     var inputLevel: Float = 0
     private var levelPollTimer: Timer?
-    var autoMicVolume: Bool = true
-    var silenceRemoval: Bool = true
-    var soundEffectsEnabled: Bool = true
-    var soundEffectsVolume: Double = 0.7
     var availableInputDevices: [AudioInputDevice] = [
         AudioInputDevice(name: "MacBook Pro Microphone", isDefault: true),
     ]
@@ -640,7 +636,7 @@ final class AppState {
             errorMessage = nil
 
             // Audio feedback so user knows recording started.
-            if soundEffectsEnabled {
+            if settings?.soundEffectsEnabled ?? true {
                 NSSound(named: "Tink")?.play()
             }
 
@@ -683,7 +679,7 @@ final class AppState {
         recordingState = .processing
 
         // Audio feedback so user knows recording stopped.
-        if soundEffectsEnabled {
+        if settings?.soundEffectsEnabled ?? true {
             NSSound(named: "Pop")?.play()
         }
 

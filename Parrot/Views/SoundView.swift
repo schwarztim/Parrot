@@ -2,9 +2,12 @@ import SwiftUI
 
 struct SoundView: View {
     @Environment(AppState.self) private var appState
+    @Environment(AppSettings.self) private var appSettings
 
     var body: some View {
         @Bindable var state = appState
+        // The toggles and volume persist in AppSettings across launches.
+        @Bindable var settings = appSettings
 
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
@@ -43,7 +46,7 @@ struct SoundView: View {
 
                     // Microphone Settings
                     Section("Microphone") {
-                        Toggle("Auto Mic Volume", isOn: $state.autoMicVolume)
+                        Toggle("Auto Mic Volume", isOn: $settings.autoMicVolume)
 
                         Text(
                             "Automatically adjusts microphone input volume for optimal recording quality. Recommended for most setups."
@@ -51,7 +54,7 @@ struct SoundView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                        Toggle("Silence Removal", isOn: $state.silenceRemoval)
+                        Toggle("Silence Removal", isOn: $settings.silenceRemoval)
 
                         Text(
                             "Removes silent segments from audio before processing. Reduces processing time and improves transcription accuracy."
@@ -62,7 +65,7 @@ struct SoundView: View {
 
                     // Sound Effects
                     Section("Sound Effects") {
-                        Toggle("Enable Sound Effects", isOn: $state.soundEffectsEnabled)
+                        Toggle("Enable Sound Effects", isOn: $settings.soundEffectsEnabled)
 
                         Text(
                             "Play audio cues when recording starts, stops, and when transcription completes."
@@ -74,18 +77,18 @@ struct SoundView: View {
                             Text("Volume")
 
                             Slider(
-                                value: $state.soundEffectsVolume,
+                                value: $settings.soundEffectsVolume,
                                 in: 0...1,
                                 step: 0.05
                             )
-                            .disabled(!state.soundEffectsEnabled)
+                            .disabled(!settings.soundEffectsEnabled)
 
-                            Text("\(Int(state.soundEffectsVolume * 100))%")
+                            Text("\(Int(settings.soundEffectsVolume * 100))%")
                                 .font(.callout.monospacedDigit())
                                 .foregroundStyle(.secondary)
                                 .frame(width: 40, alignment: .trailing)
                         }
-                        .opacity(state.soundEffectsEnabled ? 1.0 : 0.5)
+                        .opacity(settings.soundEffectsEnabled ? 1.0 : 0.5)
                     }
                 }
                 .formStyle(.grouped)
@@ -148,5 +151,6 @@ struct AudioLevelMeter: View {
 #Preview {
     SoundView()
         .environment(AppState())
+        .environment(AppSettings())
         .frame(width: 500, height: 600)
 }
