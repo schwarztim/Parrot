@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// Where a URL handed to Parrot goes.
@@ -6,8 +7,15 @@ enum URLRoute: Equatable {
     case file(URL)
     /// A `parrot://agent-*` URL.
     case agent(URL)
-    /// Any other `parrot://` host, lowercased, with its `mode` query value.
+    /// A recording action, lowercased: `toggle`, `start`, `stop`, `cancel`
+    /// (or an unknown host), with its `mode` query value (a mode name).
+    /// `record`, `record/start` and `record/stop` arrive as toggle, start
+    /// and stop.
     case action(String, mode: String?)
+    /// `parrot://mode?key=<modeKey>`: select a mode by its key.
+    case selectMode(key: String)
+    /// `parrot://settings`: open the settings window.
+    case settings
     /// Not a file and not `parrot://`.
     case ignored
 
@@ -16,18 +24,39 @@ enum URLRoute: Equatable {
             self = .file(url)
             return
         }
-        guard url.scheme == "parrot" else {
+        guard url.scheme?.lowercased() == "parrot" else {
             self = .ignored
             return
         }
-        let action = url.host()?.lowercased() ?? ""
-        if action.hasPrefix("agent-") {
+        let host = url.host()?.lowercased() ?? ""
+        if host.hasPrefix("agent-") {
             self = .agent(url)
             return
         }
-        let mode = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-            .queryItems?.first(where: { $0.name == "mode" })?.value
-        self = .action(action, mode: mode)
+        let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        func value(_ name: String) -> String? {
+            query.first(where: { $0.name == name })?.value
+        }
+        let path = url.path().lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+        switch (host, path) {
+        case ("record", ""):
+            self = .action("toggle", mode: value("mode"))
+        case ("record", "start"):
+            self = .action("start", mode: value("mode"))
+        case ("record", "stop"):
+            self = .action("stop", mode: nil)
+        case ("mode", ""):
+            if let key = value("key"), !key.isEmpty {
+                self = .selectMode(key: key)
+            } else {
+                self = .action(host, mode: value("mode"))
+            }
+        case ("settings", ""):
+            self = .settings
+        default:
+            self = .action(host, mode: value("mode"))
+        }
     }
 }
 
@@ -35,6 +64,11 @@ enum URLRoute: Equatable {
 ///
 /// The `parrot://` scheme is for scripting (Raycast, Alfred, Stream Deck,
 /// `open parrot://toggle`):
+///   parrot://record               toggle dictation (Superwhisper's route)
+///   parrot://record/start         start recording
+///   parrot://record/stop          stop and transcribe
+///   parrot://mode?key=<modeKey>   select a mode by key; does not record
+///   parrot://settings             open the settings window
 ///   parrot://toggle[?mode=Name]   toggle dictation (optionally set a mode)
 ///   parrot://start[?mode=Name]    start recording
 ///   parrot://stop                 stop and transcribe
@@ -45,6 +79,11 @@ enum URLRoute: Equatable {
 final class URLRouter {
 
     private weak var appState: AppState?
+
+    /// Opens the settings window. Defaults to the app delegate's window manager.
+    var openSettings: @MainActor () -> Void = {
+        (NSApp.delegate as? ParrotAppDelegate)?.windows?.openParrot()
+    }
 
     init(appState: AppState) {
         self.appState = appState
@@ -58,6 +97,7 @@ final class URLRouter {
 
     func handle(_ url: URL) {
         guard let appState else { return }
+        diagLog("[Parrot:URL] Deeplink action: \(url.absoluteString)")
         switch URLRoute(url) {
         case .file(let file):
             appState.services.transcription.openFile(file)
@@ -74,8 +114,26 @@ final class URLRouter {
                 default: break
                 }
             }
+        case .selectMode(let key):
+            let modes = appState.modeManager?.modes ?? appState.modes
+            guard let mode = Self.mode(forKey: key, in: modes) else {
+                diagLog("[Parrot:URL] Couldn't find mode (\(key)) on deeplink switch")
+                return
+            }
+            if let modeManager = appState.modeManager {
+                modeManager.selectMode(mode)
+            }
+            appState.currentMode = mode
+        case .settings:
+            openSettings()
         case .ignored:
             break
         }
+    }
+
+    /// The mode whose key is `key`: an exact match first, then ignoring case.
+    nonisolated static func mode(forKey key: String, in modes: [Mode]) -> Mode? {
+        modes.first { $0.key == key }
+            ?? modes.first { $0.key.compare(key, options: .caseInsensitive) == .orderedSame }
     }
 }
