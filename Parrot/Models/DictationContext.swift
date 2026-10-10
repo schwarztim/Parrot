@@ -23,6 +23,10 @@ struct DictationContext: Equatable {
     var isSecureField: Bool = false
     /// True when the field has no existing content.
     var isEmptyField: Bool = false
+    /// The front tab's address when the app is a browser.
+    var browserURL: String?
+    /// Text immediately after the insertion point (bounded).
+    var textAfterCursor: String?
 
     /// Short human label for the recording overlay, e.g. "Mail (Subject)".
     var displayLabel: String? {
@@ -34,7 +38,9 @@ struct DictationContext: Equatable {
     }
 
     /// A copy safe to send to a cloud provider: keeps only app and field
-    /// metadata, drops all user text content read from the field.
+    /// metadata, drops all user text content read from the field, and keeps
+    /// only the site of a browser address (paths and queries can carry
+    /// document names or tokens).
     var redactedForCloud: DictationContext {
         DictationContext(
             appName: appName,
@@ -44,7 +50,9 @@ struct DictationContext: Equatable {
             selectedText: nil,
             textBeforeCursor: nil,
             isSecureField: isSecureField,
-            isEmptyField: isEmptyField
+            isEmptyField: isEmptyField,
+            browserURL: browserURL.flatMap(ModeActivation.siteOnly),
+            textAfterCursor: nil
         )
     }
 
