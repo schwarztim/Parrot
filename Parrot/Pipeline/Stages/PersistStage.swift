@@ -1,7 +1,9 @@
 import Foundation
 
 /// Saves the finished dictation to history (DATA).
-/// Stub: passes the session through unchanged.
+///
+/// Only delivered dictations are saved, never for secure fields, never when
+/// history is off.
 @MainActor
 final class PersistStage: DictationStage {
     var failurePolicy: StageFailurePolicy { .skip }
@@ -14,6 +16,17 @@ final class PersistStage: DictationStage {
     }
 
     func run(_ session: DictationSession) async throws -> StageResult {
-        .continue
+        guard session.outcome == .pasted || session.outcome == .copiedOnly else { return .continue }
+
+        let context = session.context
+        if services.settings?.historyEnabled == true, context?.isSecureField != true {
+            _ = try? services.history?.insert(
+                rawTranscript: session.rawTranscript,
+                finalText: session.text,
+                appBundleID: context?.bundleID,
+                modeName: session.mode?.name
+            )
+        }
+        return .continue
     }
 }

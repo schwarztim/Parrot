@@ -152,4 +152,11 @@ final class ModeManager {
         guard let id = bundleID?.lowercased() else { return nil }
         return modes.first { $0.appBundleIDs?.contains { $0.lowercased() == id } == true }
     }
+
+    /// The mode for a dictation into `context`: the first mode that claims
+    /// the destination app, otherwise the selected mode. Never changes the
+    /// selection.
+    func resolveMode(context: DictationContext?) -> Mode {
+        mode(forBundleID: context?.bundleID) ?? selectedMode
+    }
 }

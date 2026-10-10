@@ -56,9 +56,9 @@ final class ParrotAppDelegate: NSObject, NSApplicationDelegate, ObservableObject
             Task { @MainActor in
                 if let mode { appState.selectMode(named: mode) }
                 switch action {
-                case "toggle": appState.toggleDictation()
-                case "start": appState.startRecording()
-                case "stop": appState.stopRecording()
+                case "toggle": appState.toggleDictation(trigger: .url)
+                case "start": appState.startRecording(trigger: .url)
+                case "stop": appState.stopRecording(trigger: .url)
                 case "cancel": appState.cancelRecording()
                 default: break
                 }
@@ -117,10 +117,9 @@ final class ParrotAppDelegate: NSObject, NSApplicationDelegate, ObservableObject
                 .environment(appState)
                 .environment(appSettings)
                 .onAppear {
+                    // setup() applies the saved hotkey binding before it
+                    // starts listening, so no delayed sync is needed.
                     appState.setup()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        appState.syncHotkeys(from: appSettings)
-                    }
                 }
 
             let hostingController = NSHostingController(rootView: view)

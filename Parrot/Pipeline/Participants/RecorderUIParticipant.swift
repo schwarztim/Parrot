@@ -9,12 +9,23 @@ protocol RecorderUIPresenting: AnyObject {
 }
 
 /// Shows and hides the recorder UI around a recording (UI).
-/// Stub: every hook is the default no-op.
 @MainActor
 final class RecorderUIParticipant: RecordingParticipant {
     private let services: AppServices
 
     init(services: AppServices) {
         self.services = services
+    }
+
+    func didStart(_ session: DictationSession) {
+        services.recorderUI?.showRecorder()
+    }
+
+    func didFinish(_ session: DictationSession) {
+        services.recorderUI?.hideRecorder()
+    }
+
+    func didCancel(_ session: DictationSession) {
+        services.recorderUI?.hideRecorder()
     }
 }

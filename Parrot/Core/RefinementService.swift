@@ -165,6 +165,37 @@ enum RefinementService {
     }
 }
 
+// MARK: - Refiner
+
+/// The refinement calls a dictation makes, behind a protocol so stages can
+/// be handed a fake. `ConfiguredRefiner` forwards to `RefinementService`.
+protocol Refiner {
+    func refine(
+        _ text: String,
+        modePrompt: String?,
+        context: DictationContext?,
+        settings: AppSettings
+    ) async throws -> String
+
+    func warmUpIfLocal(settings: AppSettings)
+}
+
+/// Refines with the provider configured in settings.
+struct ConfiguredRefiner: Refiner {
+    func refine(
+        _ text: String,
+        modePrompt: String?,
+        context: DictationContext?,
+        settings: AppSettings
+    ) async throws -> String {
+        try await RefinementService.refine(text, modePrompt: modePrompt, context: context, settings: settings)
+    }
+
+    func warmUpIfLocal(settings: AppSettings) {
+        RefinementService.warmUpIfLocal(settings: settings)
+    }
+}
+
 // MARK: - Errors
 
 enum RefinementError: LocalizedError {

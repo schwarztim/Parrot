@@ -29,13 +29,24 @@ final class AppServices {
 
     var audioRecorder: AudioRecorder?
 
+    // MARK: - ASR
+
+    /// The on-device engine, its preparation and readiness.
+    let transcription: TranscriptionRouter
+
     // MARK: - LLM
 
     var modes: ModeManager?
+    var refiner: any Refiner = ConfiguredRefiner()
 
     // MARK: - OUT
 
     var textInserter: TextInserter?
+
+    // MARK: - TRG
+
+    /// The global hotkey listener and binding conversion.
+    let hotkeys: HotkeyCenter
 
     // MARK: - DATA
 
@@ -45,5 +56,7 @@ final class AppServices {
     init(vocabulary: VocabularyManager) {
         self.vocabulary = vocabulary
         self.live = LiveRecordingState()
+        self.transcription = TranscriptionRouter(vocabulary: vocabulary)
+        self.hotkeys = HotkeyCenter()
     }
 }

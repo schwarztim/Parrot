@@ -122,10 +122,12 @@ struct AudioInputDevice: Identifiable, Equatable, Hashable {
 
 // MARK: - App State
 
-/// Central application state coordinator for the Parrot voice-to-text pipeline.
+/// Central application state for the Parrot voice-to-text app.
 ///
-/// Manages all UI-observable state **and** coordinates subsystem lifecycle:
-/// hotkey triggers -> audio capture -> transcription -> text insertion.
+/// Holds the UI-observable state and creates the subsystems at setup. A
+/// dictation itself runs in `DictationController` and the pipeline stages;
+/// AppState forwards start, stop, cancel and toggle to the controller and
+/// mirrors its progress into the status the views read.
 ///
 /// Main-actor isolated: every property is UI state. Heavy work (model load,
 /// transcription, refinement, network) runs inside actors or nonisolated
@@ -192,17 +194,9 @@ final class AppState {
     // Enhance mode
     var isEnhanceMode: Bool = false
 
-    /// Destination context captured at hotkey-down, used to make refinement
-    /// aware of where the text is going.
-    var capturedContext: DictationContext?
-
     /// Short label of the detected destination for the recording overlay,
     /// e.g. "Mail (Subject)". Nil when destination-aware refinement is off.
-    var destinationLabel: String?
-
-    /// Mode actually used for the in-flight dictation (auto-selected per app, or
-    /// the user's current mode). Transient; never mutates the user's selection.
-    private var activeDictationMode: Mode?
+    var destinationLabel: String? { services.live.destinationLabel }
 
     /// Set by the Home refinement nudge to request the main window switch to
     /// the Configuration tab. MainWindow observes and resets it.
@@ -238,24 +232,41 @@ final class AppState {
 
     // MARK: - Subsystem References
 
-    private(set) var audioRecorder: AudioRecorder?
-    private(set) var transcriptionEngine: TranscriptionEngine?
-    private(set) var hotkeyManager: HotkeyManager?
-    private(set) var textInserter: TextInserter?
+    /// Every service a dictation uses, handed to the pipeline stages.
+    let services: AppServices
+    /// Runs dictations. Every entry point (hotkey, URL, overlay) goes here.
+    let controller: DictationController
+
+    var audioRecorder: AudioRecorder? { services.audioRecorder }
+    var transcriptionEngine: TranscriptionEngine? { services.transcription.engine }
+    var hotkeyManager: HotkeyManager? { services.hotkeys.manager }
+    var textInserter: TextInserter? { services.textInserter }
     let vocabularyManager: VocabularyManager
-    private(set) var modeManager: ModeManager?
-    private(set) var permissionsManager: PermissionsManager?
-    private(set) var historyStore: HistoryStore?
+    var modeManager: ModeManager? { services.modes }
+    var permissionsManager: PermissionsManager? { services.permissions }
+    var historyStore: HistoryStore? { services.history }
 
     /// Settings supplying transcription/refinement provider configuration.
     /// Wired at launch by ParrotApp.
-    var settings: AppSettings?
+    var settings: AppSettings? {
+        get { services.settings }
+        set { services.settings = newValue }
+    }
 
     // MARK: - Initialization
 
     init(vocabularyManager: VocabularyManager = VocabularyManager()) {
         self.vocabularyManager = vocabularyManager
+        let services = AppServices(vocabulary: vocabularyManager)
+        self.services = services
+        self.controller = DictationController(services: services)
         currentMode = modes.first(where: { $0.isDefault })
+
+        controller.delegate = self
+        services.recorderUI = self
+        services.showTransientError = { [weak self] message in
+            self?.showTransientError(message)
+        }
     }
 
     // MARK: - Computed Properties
@@ -285,7 +296,7 @@ final class AppState {
     func initPermissionsManager() {
         guard permissionsManager == nil else { return }
         let permissions = PermissionsManager()
-        self.permissionsManager = permissions
+        services.permissions = permissions
         Task { @MainActor in
             permissions.refreshPermissions()
             microphonePermissionGranted = permissions.microphoneGranted
@@ -301,50 +312,25 @@ final class AppState {
     /// microphone step can show a live input level meter.
     func initAudioRecorder() {
         guard audioRecorder == nil else { return }
-        audioRecorder = AudioRecorder()
+        services.audioRecorder = AudioRecorder()
         diagLog("[Parrot:Onboarding] Early AudioRecorder created")
     }
-
-    /// Guards `beginModelPreparation` against launching more than one download.
-    private var modelPreparationStarted = false
 
     /// Downloads and loads the Parakeet model in the background, wiring
     /// progress into the observable state. Idempotent: safe to call from the
     /// onboarding Welcome step (to start early) and again from setup.
     func beginModelPreparation() {
-        guard !modelPreparationStarted else { return }
-        modelPreparationStarted = true
-
-        let engine = transcriptionEngine ?? TranscriptionEngine()
-        transcriptionEngine = engine
-
-        diagLog("[Parrot:Model] Starting model download/load task...")
-        // Inherits the main actor: the download, load and prewarm run inside
-        // the engine actor, and every line between awaits is back on main.
-        Task { [weak self] in
-            do {
-                try await engine.prepareModel { [weak self] progress in
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        currentStatus = .downloading(progress)
-                        modelDownloadProgress = progress
-                        isDownloadingModel = progress < 1.0
-                        if let i = availableModels.firstIndex(where: { $0.name == "Parakeet V3" }) {
-                            availableModels[i].downloadProgress = progress
-                        }
-                    }
+        services.transcription.prepare(settings: settings) { [weak self] event in
+            guard let self else { return }
+            switch event {
+            case .progress(let progress):
+                currentStatus = .downloading(progress)
+                modelDownloadProgress = progress
+                isDownloadingModel = progress < 1.0
+                if let i = availableModels.firstIndex(where: { $0.name == "Parakeet V3" }) {
+                    availableModels[i].downloadProgress = progress
                 }
-
-                try await engine.prewarm()
-                diagLog("[Parrot:Model] Pre-warm complete, model READY")
-
-                // Configure vocabulary boosting once the model is ready.
-                await engine.configureVocabulary(
-                    entries: self?.vocabularyEntries ?? [],
-                    enabled: self?.settings?.vocabularyBoostingEnabled ?? false
-                )
-
-                guard let self else { return }
+            case .ready:
                 if case .downloading = currentStatus {
                     currentStatus = .idle
                 }
@@ -353,11 +339,7 @@ final class AppState {
                     availableModels[i].isDownloaded = true
                     availableModels[i].downloadProgress = 1.0
                 }
-            } catch {
-                diagLog("[Parrot:Model] FAILED: \(error)")
-                guard let self else { return }
-                // Allow a retry after a failed attempt.
-                modelPreparationStarted = false
+            case .failed(let error):
                 currentStatus = .error("Model setup failed: \(error.localizedDescription)")
                 errorMessage = error.localizedDescription
                 isDownloadingModel = false
@@ -471,7 +453,7 @@ final class AppState {
 
         // Permissions
         let permissions = PermissionsManager()
-        self.permissionsManager = permissions
+        services.permissions = permissions
         permissions.refreshPermissions()
 
         diagLog("[Parrot:Setup] Mic preflight: \(permissions.microphoneGranted)")
@@ -491,7 +473,7 @@ final class AppState {
         // Audio recorder (reuse the one created early for the onboarding mic
         // level meter, if present).
         let recorder = audioRecorder ?? AudioRecorder()
-        self.audioRecorder = recorder
+        services.audioRecorder = recorder
         diagLog("[Parrot:Setup] AudioRecorder ready")
 
         // Populate available input devices.
@@ -517,12 +499,12 @@ final class AppState {
         beginModelPreparation()
 
         // Text inserter
-        self.textInserter = TextInserter()
+        services.textInserter = TextInserter()
 
         // History store (searchable local dictation history).
-        self.historyStore = try? HistoryStore(databaseURL: HistoryStore.defaultURL())
+        services.history = try? HistoryStore(databaseURL: HistoryStore.defaultURL())
         if let days = settings?.historyRetentionDays, days > 0 {
-            try? historyStore?.pruneOlderThan(days: days)
+            _ = try? historyStore?.pruneOlderThan(days: days)
         }
 
         // Mode manager. On first launch, seed the persisted store with the
@@ -533,23 +515,11 @@ final class AppState {
         }
         self.modes = modeManager.modes
         self.currentMode = modeManager.selectedMode
-        self.modeManager = modeManager
+        services.modes = modeManager
 
-        // Hotkey manager
-        let hotkey = HotkeyManager()
-        hotkey.onKeyDown = { [weak self] in
-            diagLog("[Parrot:Hotkey] onKeyDown fired!")
-            Task { @MainActor in
-                self?.startRecording()
-            }
-        }
-        hotkey.onKeyUp = { [weak self] in
-            diagLog("[Parrot:Hotkey] onKeyUp fired!")
-            Task { @MainActor in
-                self?.stopRecording()
-            }
-        }
-        self.hotkeyManager = hotkey
+        // Hotkey listener: key down starts and key up stops a dictation
+        // through the controller.
+        let hotkey = services.hotkeys.install(controller: controller)
 
         // Re-check Accessibility for status only. The onboarding Accessibility
         // step owns requesting it; the pipeline must never ambush the user by
@@ -579,12 +549,11 @@ final class AppState {
         }
 
         // Apply the saved binding before listening, so a custom hotkey works
-        // as soon as setup finishes (including the onboarding Try it step)
-        // instead of after the main window's delayed sync.
+        // as soon as setup finishes (including the onboarding Try it step).
         if let settings { syncHotkeys(from: settings) }
 
         diagLog("[Parrot:Setup] Starting HotkeyManager")
-        hotkey.start()
+        services.hotkeys.start()
 
         // Post-setup: log the full state so we can diagnose issues from the log alone.
         diagLog("[Parrot:Setup] === SETUP COMPLETE ===")
@@ -597,268 +566,16 @@ final class AppState {
 
     // MARK: - Recording Pipeline
 
-    /// Begins capturing audio from the microphone.
-    func startRecording() {
-        diagLog("[Parrot:AppState] startRecording called (status=\(currentStatus), recorder=\(audioRecorder != nil), modelReady=\(isModelReady))")
-
-        // Only block if already recording or processing.
-        // Allow start during model download — transcription will fail gracefully
-        // with a clear error if the model isn't ready when recording stops.
-        switch currentStatus {
-        case .recording, .processing:
-            diagLog("[Parrot:AppState] startRecording BLOCKED: status is \(currentStatus)")
-            return
-        case .error:
-            errorMessage = nil
-        case .idle, .downloading:
-            break
-        }
-
-        guard let recorder = audioRecorder else {
-            diagLog("[Parrot:AppState] startRecording BLOCKED: audioRecorder is nil")
-            return
-        }
-
-        // Capture the destination NOW, while the target app is still frontmost,
-        // and warm the refinement provider. Both cost zero perceived latency
-        // because they run before the user finishes speaking.
-        captureDestinationContext()
-        if let settings { RefinementService.warmUpIfLocal(settings: settings) }
-
-        // Pause level monitoring before recording to avoid engine conflicts.
-        pauseLevelMeter()
-
-        do {
-            try recorder.startRecording()
-            isRecording = true
-            recordingState = .recording
-            currentStatus = .recording
-            errorMessage = nil
-
-            // Audio feedback so user knows recording started.
-            if settings?.soundEffectsEnabled ?? true {
-                NSSound(named: "Tink")?.play()
-            }
-
-            RecordingOverlayPanel.show(appState: self)
-
-            diagLog("[Parrot:AppState] Recording STARTED")
-        } catch {
-            currentStatus = .error("Recording failed: \(error.localizedDescription)")
-            errorMessage = error.localizedDescription
-            diagLog("[Parrot:AppState] Recording FAILED: \(error)")
-            // Resume level monitoring since recording failed.
-            resumeLevelMeterIfVisible()
-        }
-    }
-
-    /// Captures the frontmost app and focused field. Always runs (it is cheap,
-    /// bounded by a 0.1s AX timeout, and reads nothing from secure fields) so
-    /// history logging and per-app auto-mode have the bundle id even when
-    /// destination-aware refinement is off. Only the overlay label is gated on
-    /// the setting; RefinementService independently gates prompt context.
-    private func captureDestinationContext() {
-        let context = ContextSnapshotter.capture()
-        capturedContext = context
-        destinationLabel = (settings?.destinationAwareRefinement == true) ? context.displayLabel : nil
-
-        // Resolve the effective mode for this dictation: an app-assigned mode
-        // wins, otherwise the user's current mode. Applied transiently so the
-        // user's selection is never mutated.
-        activeDictationMode = modeManager?.mode(forBundleID: context.bundleID) ?? currentMode
-        diagLog("[Parrot:AppState] Destination: \(context.displayLabel ?? "unknown"), secure=\(context.isSecureField), mode=\(activeDictationMode?.name ?? "-")")
+    /// Begins capturing audio from the microphone. Allowed during model
+    /// download; transcription fails with a clear error if the model is not
+    /// ready when recording stops.
+    func startRecording(trigger: RecordingTrigger = .menu) {
+        controller.start(trigger: trigger)
     }
 
     /// Stops recording, transcribes captured audio, and inserts the result as text.
-    func stopRecording() {
-        diagLog("[Parrot:AppState] stopRecording called (isRecording=\(isRecording), recorder=\(audioRecorder != nil))")
-        guard isRecording, let recorder = audioRecorder else { return }
-
-        let samples = recorder.stopRecording()
-        isRecording = false
-        recordingState = .processing
-
-        // Audio feedback so user knows recording stopped.
-        if settings?.soundEffectsEnabled ?? true {
-            NSSound(named: "Pop")?.play()
-        }
-
-        let durationSec = Double(samples.count) / 16000.0
-        diagLog("[Parrot:AppState] Captured \(samples.count) samples (\(String(format: "%.1f", durationSec))s)")
-
-        guard !samples.isEmpty else {
-            diagLog("[Parrot:AppState] No samples captured — skipping transcription")
-            RecordingOverlayPanel.hide()
-            recordingState = .idle
-            currentStatus = .idle
-            resumeLevelMeterIfVisible()
-            return
-        }
-
-        // Minimum ~0.3s of audio needed for reliable transcription.
-        guard durationSec >= 0.3 else {
-            diagLog("[Parrot:AppState] Recording too short (\(String(format: "%.1f", durationSec))s) — skipping transcription")
-            RecordingOverlayPanel.hide()
-            recordingState = .idle
-            currentStatus = .idle
-            resumeLevelMeterIfVisible()
-            return
-        }
-
-        currentStatus = .processing
-
-        // Warn if the recording hit the length cap and audio was dropped,
-        // rather than silently truncating.
-        if recorder.didReachCapacity {
-            showTransientError("Recording reached the 2 minute limit; the end may be cut off.")
-        }
-
-        let forceRefinement = isEnhanceMode
-
-        // Inherits the main actor. Transcription, refinement and the paste
-        // await engines and nonisolated network code, then resume here, so
-        // every read and write of AppState below happens on main.
-        Task { [weak self] in
-            guard let self else { return }
-
-            do {
-                var text = try await self.transcribe(samples)
-                let rawTranscript = text
-
-                // Apply vocabulary replacements.
-                text = self.vocabularyManager.apply(to: text)
-
-                // Refine via the configured LLM provider. Any failure falls
-                // back to the raw transcript; dictation is never lost.
-                if let settings = self.settings, settings.refinementEnabled || forceRefinement {
-                    do {
-                        text = try await RefinementService.refine(
-                            text,
-                            modePrompt: (self.activeDictationMode ?? self.currentMode)?.refinementPrompt,
-                            context: self.capturedContext,
-                            settings: settings
-                        )
-                    } catch {
-                        diagLog("[Parrot:AppState] Refinement FAILED, pasting raw transcript: \(error)")
-                        self.showTransientError(
-                            "Refinement failed, pasted raw transcript. \(error.localizedDescription)"
-                        )
-                    }
-                }
-
-                diagLog("[Parrot:AppState] Transcription complete (\(text.count) chars)")
-
-                // Snapshot values needed for history before the completion block
-                // clears the transient context.
-                let ctx = self.capturedContext
-                let modeName = (self.activeDictationMode ?? self.currentMode)?.name
-
-                self.lastTranscription = text
-                self.recordingState = .idle
-                self.currentStatus = .idle
-                self.recordingDuration = 0
-                self.waveformAmplitudes = []
-                self.isEnhanceMode = false
-                self.destinationLabel = nil
-                self.activeDictationMode = nil
-                self.capturedContext = nil
-                self.settings?.successfulDictationCount += 1
-
-                // Save to history (never for secure fields, never when disabled).
-                if self.settings?.historyEnabled == true, ctx?.isSecureField != true {
-                    try? self.historyStore?.insert(
-                        rawTranscript: rawTranscript,
-                        finalText: text,
-                        appBundleID: ctx?.bundleID,
-                        modeName: modeName
-                    )
-                }
-
-                // Copy to the pasteboard and paste; the text stays on the
-                // clipboard afterwards. If Accessibility is missing the paste
-                // is skipped and the user is told, never a silent failure.
-                let pasted = await TextInserter.insertText(text)
-                diagLog("[Parrot:AppState] Text inserted, pasted=\(pasted)")
-                RecordingOverlayPanel.hide()
-                if !pasted {
-                    self.showTransientError(
-                        "Copied to clipboard. Grant Accessibility to auto-paste (press Cmd+V to paste now)."
-                    )
-                }
-
-                // Resume the meter only if a view showing it is on screen.
-                self.resumeLevelMeterIfVisible()
-
-            } catch {
-                diagLog("[Parrot:AppState] Transcription FAILED: \(error)")
-                RecordingOverlayPanel.hide()
-                self.recordingState = .idle
-                self.currentStatus = .error("Transcription failed: \(error.localizedDescription)")
-                self.errorMessage = error.localizedDescription
-                self.isEnhanceMode = false
-                self.resumeLevelMeterIfVisible()
-            }
-        }
-    }
-
-    // MARK: - Transcription Provider Selection
-
-    /// Transcribes samples with the provider selected in settings.
-    ///
-    /// Cloud failures (or missing cloud configuration) fall back to the local
-    /// Parakeet engine when it is ready, with a non-blocking error overlay,
-    /// so dictation is never lost.
-    private func transcribe(_ samples: [Float]) async throws -> String {
-        guard let engine = transcriptionEngine else {
-            throw TranscriptionError.engineNotReady
-        }
-
-        let choice = settings?.transcriptionProvider ?? .parakeet
-        guard choice != .parakeet else {
-            return try await engine.transcribe(samples)
-        }
-
-        guard let cloud = cloudTranscriber(for: choice) else {
-            showTransientError(
-                "\(choice.displayName) is not configured, used on-device Parakeet instead."
-            )
-            return try await engine.transcribe(samples)
-        }
-
-        do {
-            return try await cloud.transcribe(samples)
-        } catch {
-            diagLog("[Parrot:AppState] Cloud transcription FAILED: \(error)")
-            guard isModelReady else { throw error }
-            showTransientError(
-                "\(choice.displayName) failed, used on-device Parakeet instead. \(error.localizedDescription)"
-            )
-            return try await engine.transcribe(samples)
-        }
-    }
-
-    /// Builds the cloud transcriber for the given choice, or nil when its
-    /// settings are incomplete.
-    private func cloudTranscriber(for choice: TranscriptionProviderChoice) -> TranscriptionProvider? {
-        guard let settings else { return nil }
-        switch choice {
-        case .parakeet:
-            return nil
-        case .openAI:
-            guard !settings.openAIKey.isEmpty, !settings.openAITranscriptionModel.isEmpty else { return nil }
-            return OpenAITranscriber(apiKey: settings.openAIKey, model: settings.openAITranscriptionModel)
-        case .azureWhisper:
-            guard !settings.azureOpenAIEndpoint.isEmpty,
-                  !settings.azureOpenAIKey.isEmpty,
-                  !settings.azureWhisperDeployment.isEmpty
-            else { return nil }
-            return AzureWhisperTranscriber(
-                endpoint: settings.azureOpenAIEndpoint,
-                apiKey: settings.azureOpenAIKey,
-                deployment: settings.azureWhisperDeployment,
-                apiVersion: settings.azureOpenAIAPIVersion
-            )
-        }
+    func stopRecording(trigger: RecordingTrigger = .menu) {
+        controller.stop(trigger: trigger)
     }
 
     // MARK: - Launch at Login
@@ -901,19 +618,15 @@ final class AppState {
 
     /// Begins recording with refinement forced on for this dictation, even if
     /// the global refinement toggle is off.
-    func startEnhanceRecording() {
+    func startEnhanceRecording(trigger: RecordingTrigger = .menu) {
         isEnhanceMode = true
-        startRecording()
+        startRecording(trigger: trigger)
     }
 
     /// Toggles dictation: starts recording if idle, stops (and transcribes) if
     /// currently recording. Used by the `parrot://` URL scheme and tap-to-toggle.
-    func toggleDictation() {
-        if isRecording {
-            stopRecording()
-        } else {
-            startRecording()
-        }
+    func toggleDictation(trigger: RecordingTrigger = .menu) {
+        controller.toggle(trigger: trigger)
     }
 
     /// Selects a mode by name (case-insensitive). Returns true if found.
@@ -929,85 +642,27 @@ final class AppState {
 
     /// Cancels the current recording without transcribing.
     func cancelRecording() {
-        guard isRecording, let recorder = audioRecorder else { return }
-        _ = recorder.stopRecording()
-        RecordingOverlayPanel.hide()
-        isRecording = false
-        recordingState = .idle
-        currentStatus = .idle
-        recordingDuration = 0
-        waveformAmplitudes = []
-        destinationLabel = nil
-        activeDictationMode = nil
-        capturedContext = nil
+        controller.cancel()
     }
+
     // MARK: - Hotkey Sync
 
-    /// Converts a UI-level `HotkeyBinding` to the CGEvent-level
-    /// `GlobalHotkeyBinding` used by HotkeyManager, and activates it.
+    /// Mirrors the saved bindings into the UI state and applies the dictation
+    /// binding to the hotkey listener (see `HotkeyCenter.apply`).
     func syncHotkeys(from settings: AppSettings) {
-        guard let hotkey = hotkeyManager else { return }
+        guard hotkeyManager != nil else { return }
 
         // Sync UI state from persisted settings
         toggleRecordingHotkey = settings.hotkeyBinding
         cancelRecordingHotkey = settings.cancelHotkeyBinding
         pushToTalkHotkey = settings.pushToTalkBinding
 
-        let binding = settings.hotkeyBinding
-
-        // Guard against broken bindings saved by the old keyCode:0 capture bug.
-        // A keyboard binding with keyCode 0 and no mouse button is invalid
-        // (unless it's intentionally "None"/empty).
-        if binding.mouseButton == nil && binding.keyCode == 0 {
-            hotkey.binding = .rightOption
-        } else {
-            hotkey.binding = Self.toGlobalBinding(binding)
-        }
+        services.hotkeys.apply(settings)
     }
 
     /// Converts a UI-level HotkeyBinding to the CGEvent-level GlobalHotkeyBinding.
     static func toGlobalBinding(_ binding: HotkeyBinding) -> HotkeyManager.GlobalHotkeyBinding {
-        // Mouse button binding
-        if let mouse = binding.mouseButton {
-            return HotkeyManager.GlobalHotkeyBinding(
-                keyCode: 0,
-                modifierFlags: 0,
-                isModifierOnly: false,
-                isMouseButton: true,
-                mouseButton: mouse
-            )
-        }
-
-        let modifierKeyCodes: Set<UInt16> = [
-            0x3A, 0x3D, // Left/Right Option
-            0x37, 0x36, // Left/Right Command
-            0x38, 0x3C, // Left/Right Shift
-            0x3B, 0x3E, // Left/Right Control
-        ]
-        let isModOnly = modifierKeyCodes.contains(binding.keyCode)
-
-        let flags: UInt64
-        if isModOnly {
-            flags = Self.modifierFlagForKeyCode(binding.keyCode)
-        } else {
-            flags = binding.cgEventFlags.rawValue
-        }
-
-        return HotkeyManager.GlobalHotkeyBinding(
-            keyCode: Int(binding.keyCode),
-            modifierFlags: flags,
-            isModifierOnly: isModOnly
-        )
-    }
-
-    private static func modifierFlagForKeyCode(_ keyCode: UInt16) -> UInt64 {
-        switch keyCode {
-        case 0x3A, 0x3D: return CGEventFlags.maskAlternate.rawValue
-        case 0x37, 0x36: return CGEventFlags.maskCommand.rawValue
-        case 0x38, 0x3C: return CGEventFlags.maskShift.rawValue
-        case 0x3B, 0x3E: return CGEventFlags.maskControl.rawValue
-        default: return 0
-        }
+        HotkeyCenter.toGlobalBinding(binding)
     }
 
     // MARK: - Input Level Monitoring
@@ -1061,6 +716,92 @@ final class AppState {
         levelPollTimer = nil
         audioRecorder?.stopMonitoring()
         inputLevel = 0
+    }
+}
+
+// MARK: - Dictation Status
+
+/// Mirrors the controller's progress into the status the views read, with
+/// the same updates the recording pipeline made before it moved out.
+extension AppState: DictationControllerDelegate {
+
+    func dictationWillOpenMic(_ session: DictationSession) {
+        if case .error = currentStatus {
+            errorMessage = nil
+        }
+        // Pause level monitoring before recording to avoid engine conflicts.
+        pauseLevelMeter()
+    }
+
+    func dictationDidStartRecording(_ session: DictationSession) {
+        isRecording = true
+        recordingState = .recording
+        currentStatus = .recording
+        errorMessage = nil
+    }
+
+    func dictationDidFailToStart(_ session: DictationSession, error: Error) {
+        currentStatus = .error("Recording failed: \(error.localizedDescription)")
+        errorMessage = error.localizedDescription
+        // Resume level monitoring since recording failed.
+        resumeLevelMeterIfVisible()
+    }
+
+    func dictationDidStopRecording(_ session: DictationSession) {
+        isRecording = false
+        recordingState = .processing
+        session.forceRefinement = isEnhanceMode
+    }
+
+    func dictationDidBeginProcessing(_ session: DictationSession) {
+        currentStatus = .processing
+    }
+
+    func dictationDidEnd(_ session: DictationSession) {
+        if session.isCancelled {
+            isRecording = false
+            recordingState = .idle
+            currentStatus = .idle
+            recordingDuration = 0
+            waveformAmplitudes = []
+            return
+        }
+
+        switch session.outcome {
+        case .pasted, .copiedOnly:
+            lastTranscription = session.text
+            recordingState = .idle
+            currentStatus = .idle
+            recordingDuration = 0
+            waveformAmplitudes = []
+            isEnhanceMode = false
+            settings?.successfulDictationCount += 1
+        case .failed(let message):
+            diagLog("[Parrot:AppState] Transcription FAILED: \(message)")
+            recordingState = .idle
+            currentStatus = .error("Transcription failed: \(message)")
+            errorMessage = message
+            isEnhanceMode = false
+        default:
+            // Discarded (too short or empty) or ended without delivery.
+            recordingState = .idle
+            currentStatus = .idle
+        }
+
+        // Resume the meter only if a view showing it is on screen.
+        resumeLevelMeterIfVisible()
+    }
+}
+
+// MARK: - Recorder Overlay
+
+extension AppState: RecorderUIPresenting {
+    func showRecorder() {
+        RecordingOverlayPanel.show(appState: self)
+    }
+
+    func hideRecorder() {
+        RecordingOverlayPanel.hide()
     }
 }
 

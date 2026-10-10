@@ -1,7 +1,6 @@
 import Foundation
 
 /// Vocabulary find and replace on the transcript (DATA).
-/// Stub: passes the session through unchanged.
 @MainActor
 final class ReplacementsStage: DictationStage {
     var failurePolicy: StageFailurePolicy { .skip }
@@ -14,6 +13,7 @@ final class ReplacementsStage: DictationStage {
     }
 
     func run(_ session: DictationSession) async throws -> StageResult {
-        .continue
+        session.text = services.vocabulary.apply(to: session.text)
+        return .continue
     }
 }
