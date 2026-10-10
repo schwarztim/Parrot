@@ -291,14 +291,16 @@ final class DictationControllerTests: XCTestCase {
         XCTAssertTrue(log.events.contains("Deliver"))
     }
 
-    func testCapacityWarningIsShownWhenTheRecordingHitTheCap() async {
+    func testNoLengthCapWarningEver() async {
+        // Recordings have no length cap any more, so stopping never warns
+        // about one, even if a recorder still reports the old flag.
         let controller = makeController()
         recorder.didReachCapacity = true
         await controller.start(trigger: .toggle)?.value
 
         await controller.stop(trigger: .toggle)?.value
 
-        XCTAssertEqual(toasts, ["Recording reached the 2 minute limit; the end may be cut off."])
+        XCTAssertEqual(toasts, [])
     }
 
     func testModeOverrideIsFrozenOnTheSession() async {

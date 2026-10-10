@@ -156,12 +156,6 @@ final class DictationController {
         phase = .processing
         delegate?.dictationDidBeginProcessing(session)
 
-        // Warn if the recording hit the length cap and audio was dropped,
-        // rather than silently truncating.
-        if recorder.didReachCapacity {
-            services.showTransientError("Recording reached the 2 minute limit; the end may be cut off.")
-        }
-
         return Task {
             await pipeline.run(session)
             end(session)

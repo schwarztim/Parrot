@@ -73,6 +73,8 @@ cat > "$APP_DIR/Contents/Info.plist" << PLIST
     <false/>
     <key>NSMicrophoneUsageDescription</key>
     <string>Parrot needs microphone access to record your voice for transcription.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Parrot uses Apple Events to pause Music and Spotify while you dictate and to run the scripts you attach to modes.</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>

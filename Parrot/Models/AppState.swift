@@ -108,18 +108,6 @@ struct VoiceModel: Identifiable, Equatable {
     }
 }
 
-struct AudioInputDevice: Identifiable, Equatable, Hashable {
-    let id: String
-    var name: String
-    var isDefault: Bool
-
-    init(id: String = UUID().uuidString, name: String, isDefault: Bool = false) {
-        self.id = id
-        self.name = name
-        self.isDefault = isDefault
-    }
-}
-
 // MARK: - App State
 
 /// Central application state for the Parrot voice-to-text app.
@@ -216,9 +204,6 @@ final class AppState {
     // Sound / Level Monitoring
     var inputLevel: Float = 0
     private var levelPollTimer: Timer?
-    var availableInputDevices: [AudioInputDevice] = [
-        AudioInputDevice(name: "MacBook Pro Microphone", isDefault: true),
-    ]
 
     // Models
     var availableModels: [VoiceModel] = [
@@ -279,13 +264,6 @@ final class AppState {
     }
 
     // MARK: - Computed Properties
-
-    var selectedInputDevice: AudioInputDevice? {
-        if let id = settings?.audio.selectedInputDeviceID {
-            return availableInputDevices.first(where: { $0.id == id })
-        }
-        return availableInputDevices.first(where: { $0.isDefault })
-    }
 
     var isModelReady: Bool {
         availableModels.first?.isDownloaded ?? false
@@ -485,23 +463,6 @@ final class AppState {
         services.audioRecorder = recorder
         diagLog("[Parrot:Setup] AudioRecorder ready")
 
-        // Populate available input devices.
-        let devices = AudioRecorder.availableInputDevices()
-        diagLog("[Parrot:Setup] Available input devices: \(devices.map { $0.name })")
-        if !devices.isEmpty {
-            availableInputDevices = devices.map { device in
-                AudioInputDevice(
-                    id: device.uid,
-                    name: device.name,
-                    isDefault: false
-                )
-            }
-            // Mark the first device as default.
-            if !availableInputDevices.isEmpty {
-                availableInputDevices[0].isDefault = true
-            }
-        }
-
         // Begin (or continue) model download. Idempotent: if the download was
         // already kicked off early from the onboarding Welcome step, this is a
         // no-op and the model is likely ready or nearly so.
@@ -573,7 +534,6 @@ final class AppState {
         diagLog("[Parrot:Setup] Mic permission: \(microphonePermissionGranted)")
         diagLog("[Parrot:Setup] Accessibility: \(accessOK)")
         diagLog("[Parrot:Setup] Hotkey binding: keyCode=\(hotkey.binding.keyCode), modifierOnly=\(hotkey.binding.isModifierOnly), mouseButton=\(hotkey.binding.isMouseButton)")
-        diagLog("[Parrot:Setup] Input devices: \(availableInputDevices.map { $0.name })")
     }
 
     // MARK: - Recording Pipeline
