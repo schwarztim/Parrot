@@ -12,6 +12,7 @@ final class TranscriptionSettings {
         static let silenceRemoval = "parrot.silenceRemoval"
         static let shortClipGate = "parrot.asr.shortClipGate"
         static let dynamicNormalization = "parrot.asr.dynamicNormalization"
+        static let activeDuration = "parrot.asr.activeDuration"
     }
 
     var transcriptionProvider: TranscriptionProviderChoice {
@@ -28,20 +29,25 @@ final class TranscriptionSettings {
         didSet { store.set(azureWhisperDeployment, forKey: Key.azureWhisperDeployment) }
     }
 
+    /// Cut silence out of the recording before transcription (Silero VAD).
     var silenceRemoval: Bool {
         didSet { store.set(silenceRemoval, forKey: Key.silenceRemoval) }
     }
 
-    /// Predeclared for ASR: skip transcription of clips too short to hold
-    /// speech. Nothing reads it yet.
+    /// Skip transcription of short clips in which no speech is detected.
     var shortClipGate: Bool {
         didSet { store.set(shortClipGate, forKey: Key.shortClipGate) }
     }
 
-    /// Predeclared for ASR: normalize input loudness before transcription.
-    /// Nothing reads it yet.
+    /// Even out input loudness before transcription.
     var dynamicNormalization: Bool {
         didSet { store.set(dynamicNormalization, forKey: Key.dynamicNormalization) }
+    }
+
+    /// Seconds an on-device voice model stays loaded after its last use.
+    /// Zero keeps it loaded.
+    var activeDuration: TimeInterval {
+        didSet { store.set(activeDuration, forKey: Key.activeDuration) }
     }
 
     private let store: SettingsStore
@@ -53,6 +59,7 @@ final class TranscriptionSettings {
         silenceRemoval = store.bool(Key.silenceRemoval, default: true)
         shortClipGate = store.bool(Key.shortClipGate, default: true)
         dynamicNormalization = store.bool(Key.dynamicNormalization, default: false)
+        activeDuration = store.double(Key.activeDuration, default: 60)
         self.store = store
     }
 }

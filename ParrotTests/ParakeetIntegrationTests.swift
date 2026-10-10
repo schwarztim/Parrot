@@ -60,6 +60,31 @@ final class ParakeetIntegrationTests: XCTestCase {
         XCTAssertFalse(stillActive)
     }
 
+    /// The keep-alive path: unload frees the model, the next load brings it
+    /// back from the cache, and transcription works again. Prints the
+    /// reload time a dictation pays after an idle unload.
+    func testUnloadAndReloadFromCache() async throws {
+        let cached = await TranscriptionEngine().isDownloaded()
+        try XCTSkipUnless(cached, "Parakeet model not cached")
+        let engine = TranscriptionEngine()
+        try await engine.load()
+        await engine.unload()
+
+        do {
+            _ = try await engine.transcribe(Self.fixtureSamples())
+            XCTFail("an unloaded engine must not transcribe")
+        } catch {
+            XCTAssertEqual(TranscriptionFailure.classify(error), .engineNotReady)
+        }
+
+        let started = Date()
+        try await engine.load()
+        let reload = Date().timeIntervalSince(started)
+        let text = try await engine.transcribe(Self.fixtureSamples())
+        XCTAssertTrue(text.lowercased().contains("hello world"), "unexpected transcription: \(text)")
+        print(String(format: "[Parakeet] reload with prewarm took %.2fs", reload))
+    }
+
     /// Loads the bundled WAV fixture as 16kHz mono Float32 samples, the same
     /// shape AudioRecorder produces.
     private static func fixtureSamples() throws -> [Float] {

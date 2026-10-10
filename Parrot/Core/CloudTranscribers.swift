@@ -39,6 +39,8 @@ struct OpenAITranscriber: TranscriptionProvider {
     /// "whisper-1", "gpt-4o-transcribe", or "gpt-4o-mini-transcribe".
     let model: String
     var timeoutInterval: TimeInterval = 60
+    /// ISO 639-1 code of the spoken language; nil lets the service detect it.
+    var language: String?
 
     func transcribe(_ samples: [Float]) async throws -> String {
         guard let url = URL(string: "https://api.openai.com/v1/audio/transcriptions") else {
@@ -47,10 +49,12 @@ struct OpenAITranscriber: TranscriptionProvider {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         // OpenAI requires the model as a form field.
+        var fields = ["model": model]
+        if let language { fields["language"] = language }
         return try await CloudTranscriberHTTP.send(
             request: request,
             samples: samples,
-            extraFields: ["model": model],
+            extraFields: fields,
             timeoutInterval: timeoutInterval
         )
     }
@@ -68,6 +72,8 @@ struct AzureWhisperTranscriber: TranscriptionProvider {
     let deployment: String
     let apiVersion: String
     var timeoutInterval: TimeInterval = 60
+    /// ISO 639-1 code of the spoken language; nil lets the service detect it.
+    var language: String?
 
     func transcribe(_ samples: [Float]) async throws -> String {
         let base = endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -80,9 +86,85 @@ struct AzureWhisperTranscriber: TranscriptionProvider {
         return try await CloudTranscriberHTTP.send(
             request: request,
             samples: samples,
-            extraFields: [:],
+            extraFields: language.map { ["language": $0] } ?? [:],
             timeoutInterval: timeoutInterval
         )
+    }
+}
+
+// MARK: - Cloud Providers From Settings
+
+/// Builds the configured cloud transcriber for a provider choice.
+enum CloudTranscription {
+    /// The transcriber for `choice`, or nil when its settings are
+    /// incomplete (or the choice is on-device).
+    @MainActor
+    static func provider(
+        for choice: TranscriptionProviderChoice,
+        settings: AppSettings?,
+        language: String? = nil
+    ) -> TranscriptionProvider? {
+        guard let settings else { return nil }
+        let transcription = settings.transcription
+        let refinement = settings.refinement
+        switch choice {
+        case .parakeet:
+            return nil
+        case .openAI:
+            let apiKey = settings.credentials.key(for: .openAI)
+            guard !apiKey.isEmpty, !transcription.openAITranscriptionModel.isEmpty else { return nil }
+            return OpenAITranscriber(
+                apiKey: apiKey, model: transcription.openAITranscriptionModel, language: language
+            )
+        case .azureWhisper:
+            let apiKey = settings.credentials.key(for: .azureOpenAI)
+            guard !refinement.azureOpenAIEndpoint.isEmpty,
+                  !apiKey.isEmpty,
+                  !transcription.azureWhisperDeployment.isEmpty
+            else { return nil }
+            return AzureWhisperTranscriber(
+                endpoint: refinement.azureOpenAIEndpoint,
+                apiKey: apiKey,
+                deployment: transcription.azureWhisperDeployment,
+                apiVersion: refinement.azureOpenAIAPIVersion,
+                language: language
+            )
+        }
+    }
+}
+
+/// A cloud transcriber in the router's engine shape. Nothing to download
+/// or load; each dictation builds a fresh one from settings.
+final class CloudBatchEngine: BatchTranscriptionEngine, @unchecked Sendable {
+    let provider: TranscriptionProvider
+
+    init(provider: TranscriptionProvider) {
+        self.provider = provider
+    }
+
+    func isDownloaded() async -> Bool { true }
+    func download(progress: @escaping @Sendable (Double) -> Void) async throws {}
+    func load() async throws {}
+    func unload() async {}
+
+    func transcribe(_ samples: [Float], options: TranscriptionOptions) async throws -> TranscriptOutput {
+        let text = try await provider(language: options.language).transcribe(samples)
+        return TranscriptOutput(text: text, language: options.language)
+    }
+
+    /// The provider told the mode's language, when it accepts one.
+    private func provider(language: String?) -> TranscriptionProvider {
+        guard let language else { return provider }
+        switch provider {
+        case var openAI as OpenAITranscriber:
+            openAI.language = language
+            return openAI
+        case var azure as AzureWhisperTranscriber:
+            azure.language = language
+            return azure
+        default:
+            return provider
+        }
     }
 }
 
