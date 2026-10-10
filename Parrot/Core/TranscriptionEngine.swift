@@ -18,8 +18,23 @@ final class TranscriptionEngine {
     private(set) var modelStatus: ModelStatus = .notDownloaded
     private var asrManager: AsrManager?
     private var modelsLoaded = false
+    /// CTC keyword spotting plus transcript rescoring. Since FluidAudio 0.17
+    /// the batch AsrManager no longer owns boosting, so the engine applies it
+    /// after each decode. Nil when boosting is off.
+    private var vocabularyBoosting: VocabularyBoostingSession?
     /// True once vocabulary boosting has been configured on the ASR manager.
     private(set) var vocabularyBoostingActive = false
+
+    /// Rescoring without FluidAudio's spotter-anchored rescue pass, which the
+    /// library documents as reproducing its pre-0.14.5 behavior. With the
+    /// rescue on, a single term rewrote unrelated speech ("Hello world" became
+    /// "GitHub") at near-zero string similarity.
+    static let rescorerConfig = VocabularyRescorer.Config(spotterRescueEnabled: false)
+
+    /// Where FluidAudio caches the Parakeet V3 model.
+    static var modelCacheDirectory: URL {
+        AsrModels.defaultCacheDirectory(for: .v3)
+    }
 
     // MARK: - Model Lifecycle
 
@@ -42,7 +57,7 @@ final class TranscriptionEngine {
             progressHandler?(0.9)
 
             let manager = AsrManager(config: .default)
-            try await manager.initialize(models: models)
+            try await manager.loadModels(models)
             self.asrManager = manager
             self.modelsLoaded = true
             modelStatus = .ready
@@ -62,7 +77,8 @@ final class TranscriptionEngine {
 
         // 1 second of silence at 16kHz.
         let silentSamples = [Float](repeating: 0, count: 16_000)
-        _ = try await manager.transcribe(silentSamples)
+        var decoderState = TdtDecoderState.make(decoderLayers: await manager.decoderLayerCount)
+        _ = try await manager.transcribe(silentSamples, decoderState: &decoderState)
     }
 
     /// Transcribes an array of 16kHz mono Float32 samples to text.
@@ -75,8 +91,21 @@ final class TranscriptionEngine {
             throw TranscriptionEngineError.notReady
         }
 
-        let result = try await manager.transcribe(samples)
-        return result.text
+        // Each dictation is an independent utterance, so it starts from a
+        // fresh decoder state (FluidAudio's batch path does the same per chunk).
+        var decoderState = TdtDecoderState.make(decoderLayers: await manager.decoderLayerCount)
+        let result = try await manager.transcribe(samples, decoderState: &decoderState)
+
+        guard let boosting = vocabularyBoosting,
+              let timings = result.tokenTimings, !timings.isEmpty
+        else { return result.text }
+
+        // Rescoring returns nil when nothing matched or CTC inference failed;
+        // either way the decoder's own text stands.
+        let rescored = await boosting.rescore(
+            text: result.text, tokenTimings: timings, audioSamples: samples
+        )
+        return rescored?.text ?? result.text
     }
 
     // MARK: - Vocabulary Boosting
@@ -93,11 +122,11 @@ final class TranscriptionEngine {
     ///   - entries: Vocabulary entries; disabled/empty ones are ignored.
     ///   - enabled: Master toggle. When false, boosting is turned off.
     func configureVocabulary(entries: [VocabularyEntry], enabled: Bool) async {
-        guard let manager = asrManager, modelsLoaded else { return }
+        guard asrManager != nil, modelsLoaded else { return }
 
         let lines = Self.simpleFormatLines(from: entries)
         guard enabled, !lines.isEmpty else {
-            await manager.disableVocabularyBoosting()
+            vocabularyBoosting = nil
             vocabularyBoostingActive = false
             return
         }
@@ -111,10 +140,13 @@ final class TranscriptionEngine {
             defer { try? FileManager.default.removeItem(at: tmp) }
 
             let (vocab, ctcModels) = try await CustomVocabularyContext.loadWithCtcTokens(from: tmp.path)
-            try await manager.configureVocabularyBoosting(vocabulary: vocab, ctcModels: ctcModels)
+            vocabularyBoosting = try await VocabularyBoostingSession(
+                vocabulary: vocab, ctcModels: ctcModels, config: Self.rescorerConfig
+            )
             vocabularyBoostingActive = true
             diagLog("[Parrot:Vocab] Boosting configured with \(vocab.terms.count) terms")
         } catch {
+            vocabularyBoosting = nil
             vocabularyBoostingActive = false
             diagLog("[Parrot:Vocab] Boosting configuration failed: \(error)")
         }

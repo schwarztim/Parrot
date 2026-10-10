@@ -7,7 +7,8 @@ let package = Package(
         .macOS(.v14)
     ],
     dependencies: [
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.7.9"),
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.17.7"),
+        .package(url: "https://github.com/argmaxinc/WhisperKit.git", .upToNextMinor(from: "0.18.0")),
         .package(url: "https://github.com/sindresorhus/KeyboardShortcuts.git", from: "2.0.0"),
     ],
     targets: [
@@ -15,6 +16,7 @@ let package = Package(
             name: "Parrot",
             dependencies: [
                 .product(name: "FluidAudio", package: "FluidAudio"),
+                .product(name: "WhisperKit", package: "WhisperKit"),
                 .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts"),
             ],
             path: "Parrot",

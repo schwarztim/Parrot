@@ -101,8 +101,7 @@ final class ParakeetIntegrationTests: XCTestCase {
     /// of the spoken phrase "Hello world, this is a Parrot transcription test."
     /// with the cached Parakeet model. No network, no API key.
     func testOfflineTranscriptionWithParakeet() async throws {
-        let cacheDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("FluidAudio/Models/parakeet-tdt-0.6b-v3-coreml")
+        let cacheDir = TranscriptionEngine.modelCacheDirectory
         try XCTSkipUnless(
             FileManager.default.fileExists(atPath: cacheDir.path),
             "Parakeet model not cached; run the app once to download it"
@@ -125,8 +124,7 @@ final class ParakeetIntegrationTests: XCTestCase {
     /// boosting with a term, and confirm it activated. Downloads the auxiliary
     /// CTC model (~110M) on first run. Self-skips when Parakeet is not cached.
     func testVocabularyBoostingConfiguresAgainstRealModels() async throws {
-        let cacheDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("FluidAudio/Models/parakeet-tdt-0.6b-v3-coreml")
+        let cacheDir = TranscriptionEngine.modelCacheDirectory
         try XCTSkipUnless(
             FileManager.default.fileExists(atPath: cacheDir.path),
             "Parakeet model not cached; run the app once to download it"
@@ -139,6 +137,11 @@ final class ParakeetIntegrationTests: XCTestCase {
         entry.isEnabled = true
         await engine.configureVocabulary(entries: [entry], enabled: true)
         XCTAssertTrue(engine.vocabularyBoostingActive, "boosting did not activate")
+
+        // Transcribing with boosting on runs the CTC rescoring pass; an
+        // unrelated term must leave the transcript intact.
+        let boosted = try await engine.transcribe(Self.fixtureSamples())
+        XCTAssertTrue(boosted.lowercased().contains("hello world"), "unexpected transcription: \(boosted)")
 
         await engine.configureVocabulary(entries: [entry], enabled: false)
         XCTAssertFalse(engine.vocabularyBoostingActive)
