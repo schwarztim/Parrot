@@ -7,10 +7,16 @@ struct SoundView: View {
     @Environment(AppState.self) private var appState
     @Environment(AppSettings.self) private var appSettings
 
+    /// The sound effects picker combines Off with the two themes.
+    private enum EffectsChoice: Hashable {
+        case off
+        case theme(SoundTheme)
+    }
+
     var body: some View {
-        @Bindable var state = appState
-        // The toggles, volume and microphone persist across launches.
+        // Every control persists across launches.
         @Bindable var audio = appSettings.audio
+        let devices = appState.services.devices
 
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
@@ -18,7 +24,7 @@ struct SoundView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Sound")
                         .font(.title2.weight(.semibold))
-                    Text("Audio input and sound effect settings")
+                    Text("Microphone, playback while recording and sound effects")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -28,20 +34,8 @@ struct SoundView: View {
                 Form {
                     // Input Device
                     Section("Input Device") {
-                        Picker("Microphone", selection: $audio.selectedInputDeviceID) {
-                            Text("System Default")
-                                .tag(nil as String?)
-                            ForEach(state.availableInputDevices) { device in
-                                HStack {
-                                    Text(device.name)
-                                    if device.isDefault {
-                                        Text("(Default)")
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                                .tag(device.id as String?)
-                            }
-                        }
+                        DevicePickerView(devices: devices)
+                            .padding(.vertical, 2)
 
                         AudioLevelMeter(level: appState.inputLevel)
                             .padding(.vertical, 4)
@@ -49,10 +43,10 @@ struct SoundView: View {
 
                     // Microphone Settings
                     Section("Microphone") {
-                        Toggle("Auto Mic Volume", isOn: $audio.autoMicVolume)
+                        Toggle("Automatically increase microphone volume", isOn: $audio.autoMicVolume)
 
                         Text(
-                            "Automatically adjusts microphone input volume for optimal recording quality. Recommended for most setups."
+                            "Sets microphone input volume to max when starting a recording. Only works if using system default device."
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -60,15 +54,29 @@ struct SoundView: View {
                         AudioProcessingSection()
                     }
 
-                    // Sound Effects
-                    Section("Sound Effects") {
-                        Toggle("Enable Sound Effects", isOn: $audio.soundEffectsEnabled)
+                    // Playback
+                    Section("Playback") {
+                        Picker("Playback when recording", selection: $audio.playbackBehavior) {
+                            ForEach(PlaybackBehavior.allCases, id: \.self) { behavior in
+                                Text(behavior.label).tag(behavior)
+                            }
+                        }
 
                         Text(
-                            "Play audio cues when recording starts, stops, and when transcription completes."
+                            "Default playback behavior during recording. Individual modes can override this setting. Pause stops Music and Spotify and lowers other audio."
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    }
+
+                    // Sound Effects
+                    Section("Sound Effects") {
+                        Picker("Sound effects", selection: effectsChoice(audio)) {
+                            Text("Off").tag(EffectsChoice.off)
+                            ForEach(SoundTheme.allCases, id: \.self) { theme in
+                                Text(theme.label).tag(EffectsChoice.theme(theme))
+                            }
+                        }
 
                         HStack {
                             Text("Volume")
@@ -86,6 +94,29 @@ struct SoundView: View {
                                 .frame(width: 40, alignment: .trailing)
                         }
                         .opacity(audio.soundEffectsEnabled ? 1.0 : 0.5)
+
+                        HStack {
+                            Button {
+                                appState.services.sounds.preview(.start, settings: audio)
+                            } label: {
+                                Label("Start", systemImage: "play.circle")
+                            }
+                            .help("Click to play Start recording sound")
+
+                            Button {
+                                appState.services.sounds.preview(.stop, settings: audio)
+                            } label: {
+                                Label("Stop", systemImage: "play.circle")
+                            }
+                            .help("Click to play Stop recording sound")
+
+                            Button {
+                                appState.services.sounds.preview(.finish(.empty), settings: audio)
+                            } label: {
+                                Label("No Result", systemImage: "play.circle")
+                            }
+                            .help("Click to play the sound for a recording with no text")
+                        }
                     }
                 }
                 .formStyle(.grouped)
@@ -99,6 +130,26 @@ struct SoundView: View {
         .onDisappear {
             appState.stopInputMonitoring()
         }
+        .onChange(of: devices.activeDevice) {
+            // The meter follows the device recordings will use.
+            appState.stopInputMonitoring()
+            appState.startInputMonitoring()
+        }
+    }
+
+    private func effectsChoice(_ audio: AudioSettings) -> Binding<EffectsChoice> {
+        Binding(
+            get: { audio.soundEffectsEnabled ? .theme(audio.soundTheme) : .off },
+            set: { choice in
+                switch choice {
+                case .off:
+                    audio.soundEffectsEnabled = false
+                case .theme(let theme):
+                    audio.soundEffectsEnabled = true
+                    audio.soundTheme = theme
+                }
+            }
+        )
     }
 }
 
