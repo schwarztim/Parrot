@@ -219,19 +219,11 @@ struct HomeView: View {
                 Text("Quick Start")
                     .font(.headline)
 
+                // The bindings saved in the Shortcuts tab.
                 VStack(spacing: 4) {
-                    instructionRow(
-                        key: "Right Option",
-                        action: "Hold to record (push to talk)"
-                    )
-                    instructionRow(
-                        key: "Right Option",
-                        action: "Tap to toggle recording"
-                    )
-                    instructionRow(
-                        key: "Esc",
-                        action: "Cancel recording"
-                    )
+                    ForEach(ShortcutLabels(hotkeys: appSettings.hotkeys).quickStartRows) { row in
+                        instructionRow(key: row.keys, action: row.action)
+                    }
                 }
             }
         }
