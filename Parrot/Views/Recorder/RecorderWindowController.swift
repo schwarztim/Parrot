@@ -20,6 +20,15 @@ struct RecorderActions {
     var expand: () -> Void = {}
     var switchMic: () -> Void = {}
     var copyResult: () -> Void = {}
+    /// The Mini record button: starts a recording when idle, stops it while
+    /// recording.
+    var toggleRecording: () -> Void = {}
+    var openHistory: () -> Void = {}
+    var openSettings: () -> Void = {}
+    /// The mic button: shows or hides the inline device picker.
+    var toggleMicPicker: () -> Void = {}
+    /// Called after a pick in the inline device picker.
+    var pickedMic: () -> Void = {}
 }
 
 /// The values the recorder views read. RecorderWindowController writes it.
@@ -30,7 +39,13 @@ final class RecorderPanelModel {
     var modes: [Mode] = []
     var selectedModeID: UUID?
     var shortcuts = ShortcutLabels(dictation: nil, pushToTalk: nil, cancel: "Esc")
+    /// Keycaps for the Mini hints: start recording and change mode.
+    var toggleKeycaps: [String] = []
+    var changeModeKeycaps: [String] = []
+    /// The inline microphone picker is open.
+    var micPickerShown = false
 
+    @ObservationIgnored var devices: AudioDeviceService?
     @ObservationIgnored var actions = RecorderActions()
     /// Called with the content's size whenever it changes.
     @ObservationIgnored var onSizeChange: (CGSize) -> Void = { _ in }
@@ -56,7 +71,10 @@ final class RecorderWindowController {
     private let appState: AppState
     private let settings: AppSettings
     private let openSoundSettings: @MainActor () -> Void
+    private let openTab: @MainActor (SidebarTab?) -> Void
     let model = RecorderPanelModel()
+    /// The Mini style's pill and attached panel.
+    private(set) lazy var mini = MiniRecorderController(model: model, settings: settings)
 
     private var panel: FloatingPanel?
     private var moveObserver: NSObjectProtocol?
@@ -75,27 +93,33 @@ final class RecorderWindowController {
     static func install(
         appState: AppState,
         settings: AppSettings,
-        openSoundSettings: @escaping @MainActor () -> Void = {}
+        openSoundSettings: @escaping @MainActor () -> Void = {},
+        openTab: @escaping @MainActor (SidebarTab?) -> Void = { _ in }
     ) -> RecorderWindowController {
         let controller = RecorderWindowController(
             appState: appState,
             settings: settings,
-            openSoundSettings: openSoundSettings
+            openSoundSettings: openSoundSettings,
+            openTab: openTab
         )
         current = controller
         return controller
     }
 
+    /// `openTab(nil)` opens the main window on whatever tab it shows.
     private init(
         appState: AppState,
         settings: AppSettings,
-        openSoundSettings: @escaping @MainActor () -> Void
+        openSoundSettings: @escaping @MainActor () -> Void,
+        openTab: @escaping @MainActor (SidebarTab?) -> Void
     ) {
         self.appState = appState
         self.settings = settings
         self.openSoundSettings = openSoundSettings
+        self.openTab = openTab
         let actions = makeActions()
         model.actions = actions
+        model.devices = appState.services.devices
         model.onSizeChange = { [weak self] size in
             self?.fit(to: size)
         }
@@ -121,21 +145,28 @@ final class RecorderWindowController {
         var modes: [Mode]
         var selectedModeID: UUID?
         var shortcuts: ShortcutLabels
+        var toggleKeycaps: [String]
+        var changeModeKeycaps: [String]
     }
 
     private func snapshot() -> Snapshot {
         let modeManager = appState.modeManager
         let selected = modeManager?.selectedMode ?? appState.currentMode
+        let hotkeys = settings.hotkeys
+        let toggle = hotkeys.shortcut(for: .toggleRecording)
         return Snapshot(
             input: RecorderInput(
                 live: live,
                 style: settings.recorder.recordingWindowStyle,
                 selectedModeName: selected?.name,
-                modeChangedName: nil
+                modeChangedName: nil,
+                alwaysShowMini: settings.recorder.alwaysShowMini
             ),
             modes: modeManager?.modes ?? appState.modes,
             selectedModeID: selected?.id,
-            shortcuts: ShortcutLabels(hotkeys: settings.hotkeys)
+            shortcuts: ShortcutLabels(hotkeys: hotkeys),
+            toggleKeycaps: toggle.isEmpty ? hotkeys.shortcut(for: .pushToTalk).keycaps : toggle.keycaps,
+            changeModeKeycaps: hotkeys.shortcut(for: .changeMode).keycaps
         )
     }
 
@@ -173,7 +204,18 @@ final class RecorderWindowController {
         if model.modes != snapshot.modes { model.modes = snapshot.modes }
         if model.selectedModeID != snapshot.selectedModeID { model.selectedModeID = snapshot.selectedModeID }
         if model.shortcuts != snapshot.shortcuts { model.shortcuts = snapshot.shortcuts }
+        if model.toggleKeycaps != snapshot.toggleKeycaps { model.toggleKeycaps = snapshot.toggleKeycaps }
+        if model.changeModeKeycaps != snapshot.changeModeKeycaps { model.changeModeKeycaps = snapshot.changeModeKeycaps }
+        if !state.isVisible, model.micPickerShown { model.micPickerShown = false }
 
+        // Mini has its own windows; the mode-changed note with no recording
+        // shows as a Mini hint too.
+        if state.style == .mini {
+            panel?.orderOut(nil)
+            mini.update(state)
+            return
+        }
+        mini.hide()
         if state.isVisible {
             present()
         } else {
@@ -261,13 +303,44 @@ final class RecorderWindowController {
             },
             switchMic: { [weak self] in
                 guard let self else { return }
-                live.errorText = nil
-                openSoundSettings()
+                // The inline picker; the Sound tab only without a device service.
+                if model.devices != nil {
+                    model.micPickerShown = true
+                } else {
+                    live.errorText = nil
+                    openSoundSettings()
+                }
             },
             copyResult: { [weak self] in
                 guard let text = self?.live.resultText, !text.isEmpty else { return }
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(text, forType: .string)
+            },
+            toggleRecording: { [weak self] in
+                guard let self else { return }
+                switch appState.controller.phase {
+                case .idle:
+                    appState.controller.start(trigger: .mini)
+                case .recording:
+                    appState.controller.stop(trigger: live.trigger ?? .mini)
+                case .starting, .stopping, .processing:
+                    break
+                }
+            },
+            openHistory: { [weak self] in
+                self?.openTab(.history)
+            },
+            openSettings: { [weak self] in
+                self?.openTab(nil)
+            },
+            toggleMicPicker: { [weak self] in
+                self?.model.micPickerShown.toggle()
+            },
+            pickedMic: { [weak self] in
+                guard let self else { return }
+                model.micPickerShown = false
+                // A silent-mic error is answered by the new pick.
+                if live.phase == .idle { live.errorText = nil }
             }
         )
     }

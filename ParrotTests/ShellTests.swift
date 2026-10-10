@@ -135,6 +135,114 @@ final class ShellTests: XCTestCase {
         }
     }
 
+    // MARK: - Back History
+
+    func testBackWalksTheTabHistory() {
+        let navigation = NavigationModel()
+        XCTAssertFalse(navigation.canGoBack)
+        navigation.request(.models)
+        navigation.request(.sound)
+        // A sidebar click writes the selection directly.
+        navigation.selectedTab = .general
+        XCTAssertEqual(navigation.history, [.home, .models, .sound])
+
+        navigation.goBack()
+        XCTAssertEqual(navigation.selectedTab, .sound)
+        navigation.goBack()
+        XCTAssertEqual(navigation.selectedTab, .models)
+        navigation.goBack()
+        XCTAssertEqual(navigation.selectedTab, .home)
+        XCTAssertFalse(navigation.canGoBack)
+        navigation.goBack()
+        XCTAssertEqual(navigation.selectedTab, .home)
+    }
+
+    func testBackSkipsHiddenTabsAndHistoryIsCapped() {
+        let navigation = NavigationModel()
+        navigation.request(.home)
+        XCTAssertTrue(navigation.history.isEmpty, "re-selecting the same tab adds nothing")
+
+        if let hidden = SidebarTab.allCases.first(where: { !$0.isAvailable }) {
+            navigation.selectedTab = .models
+            navigation.selectedTab = hidden
+            navigation.selectedTab = .sound
+            navigation.goBack()
+            XCTAssertEqual(navigation.selectedTab, .models)
+        }
+
+        for index in 0..<120 {
+            navigation.selectedTab = index.isMultiple(of: 2) ? .models : .sound
+        }
+        XCTAssertEqual(navigation.history.count, NavigationModel.historyLimit)
+    }
+
+    // MARK: - Tips, Warnings, Tooltips
+
+    func testFirstRunToastsHideWhenDismissedOrSatisfied() {
+        let home = FirstRunToasts.visible(on: .home, dismissed: [], satisfied: [])
+        XCTAssertEqual(home.map(\.id), ["home.firstDictation", "home.typingTest", "home.miniRecorder"])
+
+        let dismissed = FirstRunToasts.dismissing("home.typingTest", from: [])
+        XCTAssertEqual(
+            FirstRunToasts.visible(on: .home, dismissed: dismissed, satisfied: ["home.firstDictation"]).map(\.id),
+            ["home.miniRecorder"]
+        )
+        XCTAssertEqual(
+            FirstRunToasts.visible(on: .modes, dismissed: [], satisfied: []).map(\.id),
+            ["modes.create", "modes.activation", "modes.shortcut"]
+        )
+        XCTAssertEqual(Set(FirstRunToasts.catalog.map(\.id)).count, FirstRunToasts.catalog.count, "ids are unique")
+    }
+
+    func testDismissedToastsPersist() {
+        let settings = AppSettings(store: SettingsStore(defaults: defaults), secrets: InMemorySecretStore())
+        settings.general.dismissedToasts = FirstRunToasts.dismissing("modes.create", from: settings.general.dismissedToasts)
+        let reloaded = AppSettings(store: SettingsStore(defaults: defaults), secrets: InMemorySecretStore())
+        XCTAssertEqual(reloaded.general.dismissedToasts, ["modes.create"])
+        XCTAssertEqual(FirstRunToasts.visible(on: .modes, dismissed: reloaded.general.dismissedToasts, satisfied: []).count, 2)
+    }
+
+    func testPermissionsRequiredWarning() {
+        let warning = WarningState.permissionsRequired(missing: ["Microphone", "Accessibility"])
+        XCTAssertEqual(warning.title, "Permissions Required")
+        XCTAssertEqual(warning.primaryTitle, "Continue Anyway")
+        XCTAssertNotNil(warning.secondaryTitle)
+        XCTAssertTrue(warning.message.contains("Microphone and Accessibility"))
+        XCTAssertEqual(WarningState.lidClosed.primaryTitle, "Choose Another")
+    }
+
+    func testTooltipWarmthAndPlacement() {
+        let now = Date(timeIntervalSince1970: 100)
+        XCTAssertEqual(TooltipLogic.delay(now: now, isShowing: false, lastHiddenAt: nil), TooltipLogic.showDelay)
+        XCTAssertEqual(TooltipLogic.delay(now: now, isShowing: true, lastHiddenAt: nil), 0)
+        XCTAssertEqual(TooltipLogic.delay(now: now, isShowing: false, lastHiddenAt: now.addingTimeInterval(-0.5)), 0)
+        XCTAssertEqual(TooltipLogic.delay(now: now, isShowing: false, lastHiddenAt: now.addingTimeInterval(-2)), TooltipLogic.showDelay)
+
+        let screen = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        let size = CGSize(width: 100, height: 40)
+        let anchor = CGRect(x: 450, y: 400, width: 100, height: 20)
+        XCTAssertEqual(TooltipLogic.origin(anchor: anchor, size: size, placement: .above, screen: screen), CGPoint(x: 450, y: 426))
+        XCTAssertEqual(TooltipLogic.origin(anchor: anchor, size: size, placement: .leading, screen: screen), CGPoint(x: 344, y: 390))
+        XCTAssertEqual(TooltipLogic.origin(anchor: anchor, size: size, placement: .trailing, screen: screen), CGPoint(x: 556, y: 390))
+        // Near the top edge, "above" flips below the trigger.
+        let top = CGRect(x: 450, y: 770, width: 100, height: 20)
+        XCTAssertEqual(TooltipLogic.origin(anchor: top, size: size, placement: .above, screen: screen), CGPoint(x: 450, y: 724))
+        // At the left edge, "leading" flips to the trailing side.
+        let left = CGRect(x: 10, y: 400, width: 50, height: 20)
+        XCTAssertEqual(TooltipLogic.origin(anchor: left, size: size, placement: .leading, screen: screen).x, 66)
+    }
+
+    // MARK: - Dock and Theme
+
+    func testDockPolicyAndThemeAppearance() {
+        XCTAssertEqual(WindowManager.activationPolicy(showInDock: false, windowOpen: false), .accessory)
+        XCTAssertEqual(WindowManager.activationPolicy(showInDock: false, windowOpen: true), .regular)
+        XCTAssertEqual(WindowManager.activationPolicy(showInDock: true, windowOpen: false), .regular)
+        XCTAssertNil(WindowManager.appearance(for: .system))
+        XCTAssertEqual(WindowManager.appearance(for: .light)?.name, .aqua)
+        XCTAssertEqual(WindowManager.appearance(for: .dark)?.name, .darkAqua)
+    }
+
     // MARK: - UI Settings
 
     func testUISettingDefaultsAndNoWriteOnInit() {
@@ -143,7 +251,18 @@ final class ShellTests: XCTestCase {
         XCTAssertNil(settings.recorder.positionY)
         XCTAssertFalse(settings.recorder.closeAfterResult)
         XCTAssertFalse(settings.general.menubarClickRecords)
-        for key in ["parrot.recorder.positionX", "parrot.recorder.positionY", "parrot.recorder.closeAfterResult", "parrot.general.menubarClickRecords"] {
+        XCTAssertTrue(settings.recorder.alwaysShowMini)
+        XCTAssertEqual(settings.recorder.snapPointID, 0)
+        XCTAssertFalse(settings.general.showInDock)
+        XCTAssertEqual(settings.general.theme, .system)
+        XCTAssertEqual(settings.general.typingWPM, 40)
+        XCTAssertEqual(settings.general.onboardingProgress, 0)
+        XCTAssertEqual(settings.general.dismissedToasts, [])
+        for key in [
+            "parrot.recorder.positionX", "parrot.recorder.positionY", "parrot.recorder.closeAfterResult", "parrot.general.menubarClickRecords",
+            "parrot.recorder.alwaysShowMini", "parrot.recorder.snapPointID", "parrot.general.showInDock", "parrot.general.theme",
+            "parrot.general.typingWPM", "parrot.general.onboardingProgress", "parrot.general.dismissedToasts",
+        ] {
             XCTAssertNil(defaults.object(forKey: key), "\(key) written on init")
         }
     }
@@ -154,12 +273,23 @@ final class ShellTests: XCTestCase {
         first.recorder.positionY = -40
         first.recorder.closeAfterResult = true
         first.general.menubarClickRecords = true
+        first.general.showInDock = true
+        first.general.theme = .dark
+        first.general.typingWPM = 72.5
+        first.general.onboardingProgress = 3
+        first.general.dismissedToasts = ["home.stats", "modes.create"]
 
         let second = AppSettings(store: SettingsStore(defaults: defaults), secrets: InMemorySecretStore())
         XCTAssertEqual(second.recorder.positionX, 120)
         XCTAssertEqual(second.recorder.positionY, -40)
         XCTAssertTrue(second.recorder.closeAfterResult)
         XCTAssertTrue(second.general.menubarClickRecords)
+        XCTAssertTrue(second.general.showInDock)
+        XCTAssertEqual(second.general.theme, .dark)
+        XCTAssertEqual(second.general.typingWPM, 72.5)
+        XCTAssertEqual(second.general.onboardingProgress, 3)
+        XCTAssertEqual(second.general.dismissedToasts, ["home.stats", "modes.create"])
+        XCTAssertEqual(defaults.string(forKey: "parrot.general.theme"), "dark")
 
         // Clearing the position removes the keys (back to the default spot).
         second.recorder.positionX = nil

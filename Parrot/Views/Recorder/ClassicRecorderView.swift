@@ -9,8 +9,9 @@ private struct RecorderSizeKey: PreferenceKey {
     }
 }
 
-/// The recorder panel's content: Classic or Mini by style, or just the
-/// mode-changed note. Reports its size so the panel can fit it.
+/// The Classic panel's content, or just the mode-changed note. Reports its
+/// size so the panel can fit it. (The Mini style has its own windows, see
+/// MiniRecorderController.)
 struct RecorderRootView: View {
     let model: RecorderPanelModel
 
@@ -34,8 +35,6 @@ struct RecorderRootView: View {
         let state = model.state
         if state.screen == .modeChanged, let name = state.hudModeName {
             ModeChangedHUDView(modeName: name)
-        } else if state.style == .mini {
-            MiniRecorderView(model: model)
         } else {
             ClassicRecorderView(model: model)
         }
@@ -71,8 +70,13 @@ struct ClassicRecorderView: View {
             if let banner = state.banner {
                 RecorderBannerView(
                     banner: banner,
-                    onSwitchMic: state.screen == .error ? model.actions.switchMic : nil
+                    onSwitchMic: model.actions.switchMic
                 )
+            }
+
+            if model.micPickerShown, let devices = model.devices {
+                DevicePickerView(devices: devices, onPick: model.actions.pickedMic)
+                    .frame(width: width - inset * 2)
             }
 
             Divider()
@@ -184,7 +188,7 @@ struct ClassicRecorderView: View {
         case .cancelGuard:
             CancelGuardView(onDiscard: model.actions.discard, onResume: model.actions.resume)
                 .frame(width: contentWidth)
-        case .error, .hidden, .modeChanged:
+        case .error, .hidden, .modeChanged, .idle:
             EmptyView()
         }
     }
@@ -328,6 +332,14 @@ struct RecorderBottomBar: View {
             .buttonStyle(RecorderBarButtonStyle())
             .help("Switch mode")
             .disabled(state.screen == .modeSwitch)
+
+            if model.devices != nil {
+                Button(action: model.actions.toggleMicPicker) {
+                    Image(systemName: model.micPickerShown ? "mic.fill" : "mic")
+                }
+                .buttonStyle(RecorderBarButtonStyle())
+                .help("Choose microphone")
+            }
 
             Spacer(minLength: 8)
 

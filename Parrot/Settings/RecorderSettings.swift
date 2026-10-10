@@ -30,6 +30,8 @@ final class RecorderSettings {
         static let positionX = "parrot.recorder.positionX"
         static let positionY = "parrot.recorder.positionY"
         static let closeAfterResult = "parrot.recorder.closeAfterResult"
+        static let alwaysShowMini = "parrot.recorder.alwaysShowMini"
+        static let snapPointID = "parrot.recorder.snapPointID"
     }
 
     /// Defaults to classic, the style the overlay has always opened with
@@ -54,6 +56,19 @@ final class RecorderSettings {
         didSet { store.set(closeAfterResult, forKey: Key.closeAfterResult) }
     }
 
+    /// "Always show": with the Mini style, the pill stays on screen while
+    /// idle so a click starts a recording. Off, it shows only while a
+    /// dictation is in progress.
+    var alwaysShowMini: Bool {
+        didSet { store.set(alwaysShowMini, forKey: Key.alwaysShowMini) }
+    }
+
+    /// The snap point the Mini pill sits at (see `SnapGrid`). An id whose
+    /// screen is gone falls back to the first point.
+    var snapPointID: Int {
+        didSet { store.set(snapPointID, forKey: Key.snapPointID) }
+    }
+
     private let store: SettingsStore
 
     init(store: SettingsStore, secrets: SecretStore? = nil) {
@@ -61,6 +76,8 @@ final class RecorderSettings {
         positionX = store.contains(Key.positionX) ? store.int(Key.positionX, default: 0) : nil
         positionY = store.contains(Key.positionY) ? store.int(Key.positionY, default: 0) : nil
         closeAfterResult = store.bool(Key.closeAfterResult, default: false)
+        alwaysShowMini = store.bool(Key.alwaysShowMini, default: true)
+        snapPointID = store.int(Key.snapPointID, default: 0)
         self.store = store
     }
 
