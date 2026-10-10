@@ -13,6 +13,8 @@ final class TranscriptionSettings {
         static let shortClipGate = "parrot.asr.shortClipGate"
         static let dynamicNormalization = "parrot.asr.dynamicNormalization"
         static let activeDuration = "parrot.asr.activeDuration"
+        static let favorites = "parrot.asr.favorites"
+        static let showExperimental = "parrot.asr.showExperimental"
     }
 
     var transcriptionProvider: TranscriptionProviderChoice {
@@ -50,9 +52,21 @@ final class TranscriptionSettings {
         didSet { store.set(activeDuration, forKey: Key.activeDuration) }
     }
 
+    /// Voice model ids starred in the model library, in the order starred.
+    var favorites: [String] {
+        didSet { store.setEncoded(favorites, forKey: Key.favorites) }
+    }
+
+    /// Lists models marked experimental in the library and pickers.
+    var showExperimental: Bool {
+        didSet { store.set(showExperimental, forKey: Key.showExperimental) }
+    }
+
     private let store: SettingsStore
 
     init(store: SettingsStore, secrets: SecretStore? = nil) {
+        favorites = store.decoded([String].self, forKey: Key.favorites) ?? []
+        showExperimental = store.bool(Key.showExperimental, default: false)
         transcriptionProvider = store.value(Key.transcriptionProvider, default: .parakeet)
         openAITranscriptionModel = store.string(Key.openAITranscriptionModel, default: "whisper-1")
         azureWhisperDeployment = store.string(Key.azureWhisperDeployment, default: "")

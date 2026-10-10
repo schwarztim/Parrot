@@ -165,7 +165,8 @@ enum OpenAICompatibleSpeech {
         var form = MultipartForm(boundary: boundary)
         form.add("model", preset.modelID)
         if !translate, let language = options.language {
-            form.add("language", String(language.prefix(2)))
+            // These endpoints take a bare ISO 639-1 code: "en-GB" goes as "en".
+            form.add("language", String(language.split(separator: "-").first ?? Substring(language)))
         }
         form.add("response_format", supportsSegments(preset.modelID) ? "verbose_json" : "json")
         form.add("temperature", "0")

@@ -20,6 +20,12 @@ protocol WebSocketConnection: AnyObject, Sendable {
 /// Opens a socket for a request, or throws when it cannot connect.
 typealias WebSocketConnector = @Sendable (URLRequest) async throws -> any WebSocketConnection
 
+/// The server refused the socket (a bad or missing key).
+struct WebSocketRejected: LocalizedError, Equatable {
+    let status: Int
+    var errorDescription: String? { "The server rejected the connection (HTTP \(status)). Check the API key." }
+}
+
 enum WebSocketConnectors {
     /// Real sockets through URLSession.
     static let urlSession: WebSocketConnector = { request in
@@ -43,10 +49,18 @@ final class URLSessionWebSocketConnection: WebSocketConnection, @unchecked Senda
         task.maximumMessageSize = 16 * 1024 * 1024
         task.resume()
         let connection = URLSessionWebSocketConnection(task: task)
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            task.sendPing { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                task.sendPing { error in
+                    if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+                }
             }
+        } catch {
+            // A rejected key will never start working: no reconnects.
+            if let status = (task.response as? HTTPURLResponse)?.statusCode, status == 401 || status == 403 {
+                throw WebSocketRejected(status: status)
+            }
+            throw error
         }
         return connection
     }
@@ -343,10 +357,12 @@ actor RealtimeSocket {
 
     private func connectFirstTime() async {
         if await openConnection() { return }
+        guard state != .lost else { return }
         await reconnect()
     }
 
-    /// Opens one connection; true on success.
+    /// Opens one connection; true on success. A rejected key loses the
+    /// session at once.
     private func openConnection() async -> Bool {
         let started = Date()
         do {
@@ -370,6 +386,10 @@ actor RealtimeSocket {
             return true
         } catch {
             diagLog("[Parrot:Realtime] Connect failed: \(error.localizedDescription)")
+            if error is WebSocketRejected {
+                intentionalClose = true
+                state = .lost
+            }
             return false
         }
     }

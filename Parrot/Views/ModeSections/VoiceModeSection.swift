@@ -14,8 +14,6 @@ struct VoiceModeSection: View {
     @Environment(AppState.self) private var appState: AppState?
 
     @State private var isDownloaded = true
-    @State private var downloadProgress: Double?
-    @State private var downloadError: String?
 
     init(mode: Binding<Mode>) {
         _mode = mode
@@ -54,12 +52,41 @@ struct VoiceModeSection: View {
         )
     }
 
+    /// Picker entries: experimental models only when shown (or already
+    /// chosen), favorites first.
+    private var pickerModels: [VoiceModelInfo] {
+        VoiceModelFilter().apply(
+            to: VoiceModels.all,
+            favorites: appSettings?.transcription.favorites ?? [],
+            downloaded: [],
+            showExperimental: appSettings?.transcription.showExperimental ?? false,
+            keep: mode.voiceModelID
+        )
+    }
+
     var body: some View {
         Section("Voice") {
             Picker("Voice model", selection: modelID) {
                 Text("Default (\(defaultModel.name))").tag("")
-                ForEach(VoiceModels.all) { option in
-                    Text(option.name).tag(option.id)
+                let options = pickerModels
+                let favorites = appSettings?.transcription.favorites ?? []
+                let starred = options.filter { favorites.contains($0.id) }
+                if !starred.isEmpty {
+                    Section("Favorites") {
+                        ForEach(starred) { option in
+                            Text(option.name).tag(option.id)
+                        }
+                    }
+                }
+                Section("On device") {
+                    ForEach(options.filter { $0.isOnDevice && !favorites.contains($0.id) }) { option in
+                        Text(option.name).tag(option.id)
+                    }
+                }
+                Section("Cloud") {
+                    ForEach(options.filter { !$0.isOnDevice && !favorites.contains($0.id) }) { option in
+                        Text(option.name).tag(option.id)
+                    }
                 }
             }
             Text("Converts your speech to text. \(model.detail)")
@@ -123,19 +150,26 @@ struct VoiceModeSection: View {
 
     @ViewBuilder
     private var downloadRow: some View {
+        let state = appState?.services.voiceCatalog.state(for: model)
         HStack {
             Label("\(model.name) is selected but not downloaded.", systemImage: "exclamationmark.triangle")
                 .foregroundStyle(.orange)
             Spacer()
-            if let downloadProgress {
-                ProgressView(value: downloadProgress)
+            if case .downloading(let fraction) = state {
+                ProgressView(value: fraction)
                     .frame(width: 80)
+                Text("\(Int(fraction * 100))%")
+                    .font(.caption.monospacedDigit())
+                Button("Cancel") { appState?.services.voiceCatalog.cancelDownload(model) }
+            } else if case .downloaded = state {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
             } else if appState != nil {
-                Button("Download") { startDownload() }
+                Button("Download") { appState?.services.voiceCatalog.download(model) }
             }
         }
-        if let downloadError {
-            Text(downloadError)
+        if case .failed(let message) = state {
+            Text("Download failed: \(message)")
                 .font(.caption)
                 .foregroundStyle(.red)
         }
@@ -147,24 +181,5 @@ struct VoiceModeSection: View {
             return
         }
         isDownloaded = await appState.services.transcription.isDownloaded(model, settings: appSettings)
-    }
-
-    private func startDownload() {
-        guard let appState else { return }
-        let target = model
-        downloadError = nil
-        downloadProgress = 0
-        Task {
-            do {
-                try await appState.services.transcription.download(target, settings: appSettings) { fraction in
-                    Task { @MainActor in downloadProgress = fraction }
-                }
-                downloadProgress = nil
-                await refreshDownloaded()
-            } catch {
-                downloadProgress = nil
-                downloadError = "Download failed: \(error.localizedDescription)"
-            }
-        }
     }
 }

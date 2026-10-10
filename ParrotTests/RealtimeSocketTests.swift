@@ -37,6 +37,10 @@ final class FakeWebSocket: WebSocketConnection, @unchecked Sendable {
     }
 
     func send(_ message: WebSocketMessage) async throws {
+        try record(message)
+    }
+
+    private func record(_ message: WebSocketMessage) throws {
         lock.lock()
         defer { lock.unlock() }
         if closed { throw Dropped() }
@@ -319,6 +323,24 @@ final class RealtimeSocketTests: XCTestCase {
         XCTAssertEqual(connector.attempts, 1, "a terminal error never reconnects")
         let result = await socket.finish()
         XCTAssertFalse(result.complete)
+    }
+
+    func testRejectedKeyNeverReconnects() async {
+        let sleeps = SleepLog()
+        let attempts = CallCounter()
+        let socket = RealtimeSocket(
+            request: request(), vendor: DeepgramRealtimeProtocol(),
+            connector: { _ in
+                _ = attempts.increment()
+                throw WebSocketRejected(status: 401)
+            },
+            config: config(), sleep: sleeps.sleep
+        )
+        await socket.start()
+        let lost = await eventually { await socket.state == .lost }
+        XCTAssertTrue(lost)
+        XCTAssertEqual(attempts.value, 1)
+        XCTAssertEqual(sleeps.all, [])
     }
 
     // MARK: - Fallback
