@@ -176,6 +176,62 @@ final class ShellTests: XCTestCase {
         XCTAssertEqual(navigation.history.count, NavigationModel.historyLimit)
     }
 
+    // MARK: - Tips, Warnings, Tooltips
+
+    func testFirstRunToastsHideWhenDismissedOrSatisfied() {
+        let home = FirstRunToasts.visible(on: .home, dismissed: [], satisfied: [])
+        XCTAssertEqual(home.map(\.id), ["home.firstDictation", "home.typingTest", "home.miniRecorder"])
+
+        let dismissed = FirstRunToasts.dismissing("home.typingTest", from: [])
+        XCTAssertEqual(
+            FirstRunToasts.visible(on: .home, dismissed: dismissed, satisfied: ["home.firstDictation"]).map(\.id),
+            ["home.miniRecorder"]
+        )
+        XCTAssertEqual(
+            FirstRunToasts.visible(on: .modes, dismissed: [], satisfied: []).map(\.id),
+            ["modes.create", "modes.activation", "modes.shortcut"]
+        )
+        XCTAssertEqual(Set(FirstRunToasts.catalog.map(\.id)).count, FirstRunToasts.catalog.count, "ids are unique")
+    }
+
+    func testDismissedToastsPersist() {
+        let settings = AppSettings(store: SettingsStore(defaults: defaults), secrets: InMemorySecretStore())
+        settings.general.dismissedToasts = FirstRunToasts.dismissing("modes.create", from: settings.general.dismissedToasts)
+        let reloaded = AppSettings(store: SettingsStore(defaults: defaults), secrets: InMemorySecretStore())
+        XCTAssertEqual(reloaded.general.dismissedToasts, ["modes.create"])
+        XCTAssertEqual(FirstRunToasts.visible(on: .modes, dismissed: reloaded.general.dismissedToasts, satisfied: []).count, 2)
+    }
+
+    func testPermissionsRequiredWarning() {
+        let warning = WarningState.permissionsRequired(missing: ["Microphone", "Accessibility"])
+        XCTAssertEqual(warning.title, "Permissions Required")
+        XCTAssertEqual(warning.primaryTitle, "Continue Anyway")
+        XCTAssertNotNil(warning.secondaryTitle)
+        XCTAssertTrue(warning.message.contains("Microphone and Accessibility"))
+        XCTAssertEqual(WarningState.lidClosed.primaryTitle, "Choose Another")
+    }
+
+    func testTooltipWarmthAndPlacement() {
+        let now = Date(timeIntervalSince1970: 100)
+        XCTAssertEqual(TooltipLogic.delay(now: now, isShowing: false, lastHiddenAt: nil), TooltipLogic.showDelay)
+        XCTAssertEqual(TooltipLogic.delay(now: now, isShowing: true, lastHiddenAt: nil), 0)
+        XCTAssertEqual(TooltipLogic.delay(now: now, isShowing: false, lastHiddenAt: now.addingTimeInterval(-0.5)), 0)
+        XCTAssertEqual(TooltipLogic.delay(now: now, isShowing: false, lastHiddenAt: now.addingTimeInterval(-2)), TooltipLogic.showDelay)
+
+        let screen = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        let size = CGSize(width: 100, height: 40)
+        let anchor = CGRect(x: 450, y: 400, width: 100, height: 20)
+        XCTAssertEqual(TooltipLogic.origin(anchor: anchor, size: size, placement: .above, screen: screen), CGPoint(x: 450, y: 426))
+        XCTAssertEqual(TooltipLogic.origin(anchor: anchor, size: size, placement: .leading, screen: screen), CGPoint(x: 344, y: 390))
+        XCTAssertEqual(TooltipLogic.origin(anchor: anchor, size: size, placement: .trailing, screen: screen), CGPoint(x: 556, y: 390))
+        // Near the top edge, "above" flips below the trigger.
+        let top = CGRect(x: 450, y: 770, width: 100, height: 20)
+        XCTAssertEqual(TooltipLogic.origin(anchor: top, size: size, placement: .above, screen: screen), CGPoint(x: 450, y: 724))
+        // At the left edge, "leading" flips to the trailing side.
+        let left = CGRect(x: 10, y: 400, width: 50, height: 20)
+        XCTAssertEqual(TooltipLogic.origin(anchor: left, size: size, placement: .leading, screen: screen).x, 66)
+    }
+
     // MARK: - Dock and Theme
 
     func testDockPolicyAndThemeAppearance() {

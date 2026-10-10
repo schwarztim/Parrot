@@ -286,6 +286,7 @@ final class MiniRecorderController {
             guard Date().timeIntervalSince(lastDragEnd) > 0.05 else { return }
             drag = (mouse, panel.frame.origin)
             mini.isDragging = true
+            TooltipCenter.shared.isSuppressed = true
             refreshAttached()
             showIndicators(size: panel.frame.size)
             startDragWatchdog()
@@ -310,6 +311,7 @@ final class MiniRecorderController {
             }
         }
         mini.isDragging = false
+        TooltipCenter.shared.isSuppressed = false
         placePill(animated: snap)
         refreshAttached()
     }
