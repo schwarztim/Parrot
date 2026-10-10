@@ -72,7 +72,11 @@ final class LiveTranscriptionParticipant: RecordingParticipant {
     }
 
     func willStop(_ session: DictationSession) {
-        tearDown()
+        if let model = heldModel, model.usesRealtimeFinal, activeSessionID == session.id, let opening {
+            handOff(session, model: model, opening: opening)
+        } else {
+            tearDown()
+        }
     }
 
     func didFinish(_ session: DictationSession) {
@@ -85,6 +89,41 @@ final class LiveTranscriptionParticipant: RecordingParticipant {
         tearDown()
         releaseModel()
         clearLiveText()
+    }
+
+    // MARK: - Realtime Final Text
+
+    /// The mic has closed on a cloud vendor's live session: finish the
+    /// session (send the rest, ask for final results) and leave its text
+    /// on the session for TranscribeStage. Nil text means the session was
+    /// lost or never opened, so the stage transcribes in a batch pass.
+    private func handOff(_ session: DictationSession, model: VoiceModelInfo, opening: Task<Void, Never>) {
+        if let sink {
+            // The mic is closed, so no frame arrives after this; the sink
+            // still forwards what it holds once the stream attaches.
+            services.audioRecorder?.removeSink(sink)
+        }
+        let sink = self.sink
+        session.realtimeModelID = model.id
+        session.realtimeTranscript = Task { @MainActor [weak self] in
+            await opening.value
+            guard let stream = self?.stream else {
+                sink?.detach()
+                return nil
+            }
+            do {
+                let text = try await stream.finish()
+                sink?.detach()
+                return text
+            } catch {
+                sink?.detach()
+                diagLog("[Parrot:Live] Realtime session incomplete: \(error)")
+                return nil
+            }
+        }
+        // Live updates keep showing until the session finishes; didFinish
+        // tears the stream down, which is a no-op once it has finished.
+        self.sink = nil
     }
 
     // MARK: - Private
@@ -122,6 +161,32 @@ final class LiveTranscriptionParticipant: RecordingParticipant {
     private func clearLiveText() {
         services.live.confirmedText = ""
         services.live.hypothesisText = ""
+    }
+}
+
+// MARK: - Session Attachments
+
+private enum RealtimeTranscriptKey: SessionKey {
+    static var defaultValue: Task<String?, Never>? { nil }
+}
+
+private enum RealtimeModelIDKey: SessionKey {
+    static var defaultValue: String? { nil }
+}
+
+extension DictationSession {
+    /// The final text of a cloud vendor's live session, finishing in the
+    /// background from the moment the mic closes. Nil text: the session
+    /// was lost or gave nothing, so transcribe the recording instead.
+    var realtimeTranscript: Task<String?, Never>? {
+        get { self[RealtimeTranscriptKey.self] }
+        set { self[RealtimeTranscriptKey.self] = newValue }
+    }
+
+    /// The voice model the live session streamed to.
+    var realtimeModelID: String? {
+        get { self[RealtimeModelIDKey.self] }
+        set { self[RealtimeModelIDKey.self] = newValue }
     }
 }
 

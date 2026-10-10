@@ -7,17 +7,22 @@ struct TranscriptionOptions: Equatable, Sendable {
     /// Spoken language code, or nil to let the model detect it.
     var language: String?
     var translateToEnglish: Bool
+    /// Ask a cloud vendor for word-level speaker labels.
+    var diarize: Bool
 
-    init(language: String? = nil, translateToEnglish: Bool = false) {
+    init(language: String? = nil, translateToEnglish: Bool = false, diarize: Bool = false) {
         self.language = language
         self.translateToEnglish = translateToEnglish
+        self.diarize = diarize
     }
 
-    /// The mode's language and translate settings. "auto" and "" mean detect.
+    /// The mode's language, translate and speaker settings. "auto" and ""
+    /// mean detect.
     init(mode: Mode?) {
         let code = mode?.language.trimmingCharacters(in: .whitespaces) ?? ""
         language = (code.isEmpty || code == LanguageCatalog.automatic) ? nil : code
         translateToEnglish = mode?.translateToEnglish ?? false
+        diarize = mode?.diarize ?? false
     }
 }
 

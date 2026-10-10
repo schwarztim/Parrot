@@ -14,6 +14,14 @@ enum LanguageSet: Hashable, Sendable {
     /// Parakeet V3's 25 European languages.
     case parakeetV3
     case english
+    /// Cohere Transcribe's 14 languages.
+    case cohere
+    /// SenseVoice: Chinese, Cantonese, English, Japanese, Korean.
+    case senseVoice
+    /// Mandarin Chinese only (Paraformer).
+    case mandarin
+    /// Deepgram Nova's list, with regional English and Chinese.
+    case deepgram
 }
 
 /// Per-model language lists for the mode editor. [ASR]
@@ -30,6 +38,10 @@ enum LanguageCatalog {
         case .whisper: return whisper
         case .parakeetV3: return parakeetV3
         case .english: return [VoiceLanguage(code: "en", name: "English")]
+        case .cohere: return whisper.filter { cohereCodes.contains($0.code) }
+        case .senseVoice: return whisper.filter { senseVoiceCodes.contains($0.code) }
+        case .mandarin: return [VoiceLanguage(code: "zh", name: "Chinese")]
+        case .deepgram: return deepgram
         }
     }
 
@@ -41,13 +53,39 @@ enum LanguageCatalog {
 
     /// What a mode falls back to when its language does not fit the model.
     static func defaultCode(for model: VoiceModelInfo) -> String {
-        model.supportsAutoLanguage ? automatic : (languages(for: model).first?.code ?? "en")
+        if model.supportsAutoLanguage { return automatic }
+        let codes = languages(for: model).map(\.code)
+        return codes.contains("en") ? "en" : (codes.first ?? "en")
     }
 
     static func name(for code: String) -> String {
         if code == automatic { return automaticChoice.name }
-        return whisper.first { $0.code == code }?.name ?? code
+        return (whisper + regional).first { $0.code == code }?.name ?? code
     }
+
+    /// Cohere Transcribe's languages.
+    static let cohereCodes: Set<String> = [
+        "en", "fr", "de", "es", "it", "pt", "nl", "pl", "el", "ar", "ja", "zh", "vi", "ko",
+    ]
+
+    /// SenseVoice's languages.
+    static let senseVoiceCodes: Set<String> = ["zh", "yue", "en", "ja", "ko"]
+
+    /// Regional variants some cloud vendors take as distinct codes.
+    static let regional: [VoiceLanguage] = [
+        VoiceLanguage(code: "en-GB", name: "English (UK)"),
+        VoiceLanguage(code: "zh-TW", name: "Chinese (Taiwan)"),
+    ]
+
+    /// Deepgram Nova's languages, sorted by name.
+    static let deepgram: [VoiceLanguage] = (
+        whisper.filter {
+            [
+                "en", "fr", "de", "ja", "es", "zh", "nl", "hi", "ru", "ko", "it", "uk",
+                "pl", "pt", "tr", "el", "cs", "sv", "no", "da", "id",
+            ].contains($0.code)
+        } + regional
+    ).sorted { $0.name < $1.name }
 
     // MARK: - Lists
 
