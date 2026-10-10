@@ -284,11 +284,13 @@ final class HookPayloadTests: XCTestCase {
         XCTAssertEqual(session?["destination"]?.stringValue, "session")
         XCTAssertEqual(session?["type"]?.stringValue, "addRules")
 
-        let bypass = HookDecision.permissionUpdate(input: input, response: AgentHookResponse(requestId: "r", action: .bypass))
-        XCTAssertEqual(bypass?.compactText, #"{"destination":"session","mode":"bypassPermissions","type":"setMode"}"#)
+        // Bypass is Parrot's own marker: the CLI's mode is never switched.
+        XCTAssertNil(HookDecision.permissionUpdate(input: input, response: AgentHookResponse(requestId: "r", action: .bypass)))
+        let bypassOutput = try XCTUnwrap(try output(.claude, .permission, Self.claudePermission, AgentHookResponse(requestId: "r", action: .bypass)))
+        XCTAssertEqual(bypassOutput, #"{"hookSpecificOutput":{"decision":{"behavior":"allow"},"hookEventName":"PermissionRequest"}}"#)
 
         // Without an index, "always allow" skips a mode suggestion and
-        // saves the first allow rule.
+        // saves the first narrow allow rule.
         var mixed = input
         mixed.permissionSuggestions = [
             .object(["type": .string("setMode"), "mode": .string("acceptEdits"), "destination": .string("session")]),
@@ -297,12 +299,73 @@ final class HookPayloadTests: XCTestCase {
         XCTAssertEqual(rule?["type"]?.stringValue, "addRules")
         XCTAssertEqual(rule?["destination"]?.stringValue, "localSettings")
 
-        // No suggestions (file edit dialogs send none): a whole-tool rule.
+        // No suggestions (file edit dialogs send none): nothing is made up,
+        // so the decision is a plain allow.
         var edit = input
         edit.toolName = "Edit"
         edit.permissionSuggestions = nil
-        let always = HookDecision.permissionUpdate(input: edit, response: AgentHookResponse(requestId: "r", action: .allowAlways))
-        XCTAssertEqual(always?.compactText, #"{"behavior":"allow","destination":"localSettings","rules":[{"toolName":"Edit"}],"type":"addRules"}"#)
+        XCTAssertNil(HookDecision.permissionUpdate(input: edit, response: AgentHookResponse(requestId: "r", action: .allowAlways)))
+        XCTAssertNil(HookDecision.permissionUpdate(input: edit, response: AgentHookResponse(requestId: "r", action: .allowSession)))
+    }
+
+    // MARK: - Narrow Grants
+
+    private func rule(_ tool: String, _ content: String?, destination: String = "localSettings", type: String = "addRules") -> HookJSON {
+        var rule: [String: HookJSON] = ["toolName": .string(tool)]
+        if let content { rule["ruleContent"] = .string(content) }
+        return .object([
+            "type": .string(type), "behavior": .string("allow"),
+            "destination": .string(destination), "rules": .array([.object(rule)]),
+        ])
+    }
+
+    func testOnlyNarrowRulesCanBeAlwaysAllowed() {
+        let specific: [(String, String?)] = [
+            ("Bash", "rm -rf node_modules"), ("Bash", "npm run test:*"), ("Bash", "git commit *"),
+            ("Bash", "ls"), ("Edit", "src/**"), ("WebFetch", "domain:example.com"), ("Read", "/Users/example/a.swift"),
+        ]
+        for (tool, content) in specific {
+            XCTAssertTrue(HookPermissionRules.isAlwaysAllowable(rule(tool, content)), "\(tool)(\(content ?? ""))")
+        }
+        let broad: [(String, String?)] = [
+            ("Bash", nil), ("Bash", "*"), ("Bash", ""), ("Bash", "npm:*"), ("Bash", "git *"), ("Bash", "rm * -rf"),
+            ("Edit", nil), ("Edit", "**"), ("Read", "/**"), ("mcp__memory__create", nil), ("mcp__memory__*", "x"),
+        ]
+        for (tool, content) in broad {
+            XCTAssertFalse(HookPermissionRules.isAlwaysAllowable(rule(tool, content)), "\(tool)(\(content ?? ""))")
+        }
+        // Mode changes, directories, other destinations and deny rules never qualify.
+        XCTAssertFalse(HookPermissionRules.isAlwaysAllowable(.object(["type": .string("setMode"), "mode": .string("acceptEdits"), "destination": .string("localSettings")])))
+        XCTAssertFalse(HookPermissionRules.isAlwaysAllowable(.object(["type": .string("addDirectories"), "directories": .array([.string("/")]), "destination": .string("localSettings")])))
+        XCTAssertFalse(HookPermissionRules.isAlwaysAllowable(rule("Bash", "npm test", destination: "userSettings")))
+        XCTAssertFalse(HookPermissionRules.isAlwaysAllowable(rule("Bash", "npm test", type: "replaceRules")))
+        // Session grants allow any destination but are just as narrow.
+        XCTAssertTrue(HookPermissionRules.isSessionAllowable(rule("Bash", "npm test", destination: "userSettings")))
+        XCTAssertFalse(HookPermissionRules.isSessionAllowable(rule("Bash", "npm:*", destination: "session")))
+    }
+
+    func testRuleTextIsExactlyWhatIsSaved() {
+        XCTAssertEqual(HookPermissionRules.text(of: rule("Bash", "npm run test:*")), "Bash(npm run test:*)")
+        XCTAssertEqual(HookPermissionRules.text(of: rule("Edit", nil)), "Edit")
+        XCTAssertNil(HookPermissionRules.text(of: .object(["type": .string("setMode"), "mode": .string("plan")])))
+    }
+
+    func testBroadSuggestionsGetAPlainAllow() throws {
+        var input = try decode(Self.claudePermission)
+        input.permissionSuggestions = [rule("Bash", nil), rule("Bash", "npm:*")]
+        XCTAssertNil(HookPermissionRules.alwaysAllowIndex(in: input.permissionSuggestions!))
+        // Even an index pointing at a broad suggestion saves nothing.
+        for action in [AgentHookResponse.Action.allowAlways, .allowSession] {
+            for index in [0, 1, nil] {
+                XCTAssertNil(HookDecision.permissionUpdate(input: input, response: AgentHookResponse(requestId: "r", action: action, suggestionIndex: index)))
+            }
+        }
+        input.permissionSuggestions?.append(rule("Bash", "npm run lint"))
+        XCTAssertEqual(HookPermissionRules.alwaysAllowIndex(in: input.permissionSuggestions!), 2)
+        XCTAssertEqual(
+            HookDecision.permissionUpdate(input: input, response: AgentHookResponse(requestId: "r", action: .allowAlways))?["rules"]?.arrayValue?.first?["ruleContent"]?.stringValue,
+            "npm run lint"
+        )
     }
 
     func testCodexRicherAllowsDegradeToPlainAllow() throws {
@@ -360,16 +423,16 @@ final class HookPayloadTests: XCTestCase {
         XCTAssertEqual(url.host(), "agent-update")
         XCTAssertEqual(URLRoute(url), .agent(url))
 
-        // Exactly the request id, agent, event and project name; nothing from
-        // the message, the tool input, the session or any path.
+        // Exactly the request id, agent, event, project name and session id;
+        // nothing from the message, the tool input, the mode or any path.
         let names = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.map(\.name).sorted()
-        XCTAssertEqual(names, ["agent", "event", "project", "request"])
-        for secret in ["rm -rf", "node_modules", "secret", "API_KEY", "abc123", "/Users/example", "main"] {
+        XCTAssertEqual(names, ["agent", "event", "project", "request", "session"])
+        for secret in ["rm -rf", "node_modules", "secret", "API_KEY", "/Users/example", "main", "default", "Remove"] {
             XCTAssertFalse(url.absoluteString.contains(secret), "link leaks \(secret)")
         }
 
         let link = try XCTUnwrap(AgentDeepLink(url: url))
-        XCTAssertEqual(link, AgentDeepLink(kind: .update, requestId: Self.requestId, agent: .claude, event: .permission, project: "my-project"))
+        XCTAssertEqual(link, AgentDeepLink(kind: .update, requestId: Self.requestId, agent: .claude, event: .permission, project: "my-project", sessionId: "abc123"))
 
         let dismiss = AgentDeepLink(message: .dismiss(agent: .codex, sessionId: "s", requestId: Self.requestId, hookPid: nil))
         XCTAssertEqual(dismiss.url?.host(), "agent-dismiss")
@@ -388,9 +451,18 @@ final class HookPayloadTests: XCTestCase {
         for text in bad {
             XCTAssertNil(AgentDeepLink(url: try XCTUnwrap(URL(string: text))), text)
         }
-        // Extra items such as a response path are ignored, never used.
-        let crafted = try XCTUnwrap(URL(string: "parrot://agent-update?request=\(Self.requestId)&agent=codex&event=stop&responseFile=/tmp/evil.json&payload=xyz"))
+        // Extra items such as a response path or a mode are ignored, never
+        // used; a session id with a path in it is dropped.
+        let crafted = try XCTUnwrap(URL(string: "parrot://agent-update?request=\(Self.requestId)&agent=codex&event=stop&responseFile=/tmp/evil.json&payload=xyz&permissionMode=bypassPermissions&session=../../x"))
         XCTAssertEqual(AgentDeepLink(url: crafted), AgentDeepLink(kind: .update, requestId: Self.requestId, agent: .codex, event: .stop, project: nil))
+        XCTAssertNil(AgentDeepLink(url: crafted)?.sessionId)
+    }
+
+    func testProcessLookupFindsTheParent() throws {
+        let me = try XCTUnwrap(AgentHookProcess.parentAndName(of: getpid()))
+        XCTAssertEqual(me.parent, getppid())
+        XCTAssertFalse(me.name.isEmpty)
+        XCTAssertNil(AgentHookProcess.parentAndName(of: 999_999))
     }
 
     func testRequestIdsAndDerivedPaths() {

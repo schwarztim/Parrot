@@ -57,16 +57,17 @@ final class AgentFixture {
 
     func update(
         _ event: HookEvent, session: String, request: String, pid: Int32 = 100,
-        agent: HookAgent = .claude, message: String = "Done."
+        agent: HookAgent = .claude, message: String = "Done.", cliPid: Int32? = 102,
+        suggestions: [HookJSON]? = nil
     ) -> AgentInboxMessage {
         var update = AgentInboxMessage(
             kind: .update, agent: agent, sessionId: session, requestId: request, event: event,
             summary: AgentInboxMessage.firstLine(of: message), message: message,
-            cwd: "/Users/example/app", project: "app", branch: "main", hookPid: pid,
+            cwd: "/Users/example/app", project: "app", branch: "main", hookPid: pid, cliPid: cliPid,
             createdAt: Date().timeIntervalSince1970
         )
         if event == .permission {
-            update.permission = HookPermission(agent: agent, toolName: "Bash", toolInput: .object(["command": .string("make")]), suggestions: nil)
+            update.permission = HookPermission(agent: agent, toolName: "Bash", toolInput: .object(["command": .string("make")]), suggestions: suggestions)
         }
         if event == .question {
             update.questions = [
@@ -77,8 +78,18 @@ final class AgentFixture {
         return update
     }
 
-    func link(_ event: HookEvent, request: String, agent: HookAgent = .claude) -> URL {
-        AgentDeepLink(kind: .update, requestId: request, agent: agent, event: event, project: "app").url!
+    func link(_ event: HookEvent, request: String, agent: HookAgent = .claude, session: String? = nil) -> URL {
+        AgentDeepLink(kind: .update, requestId: request, agent: agent, event: event, project: "app", sessionId: session).url!
+    }
+
+    /// A Claude permission suggestion with one allow rule.
+    func suggestion(_ tool: String, _ content: String?, destination: String = "localSettings") -> HookJSON {
+        var rule: [String: HookJSON] = ["toolName": .string(tool)]
+        if let content { rule["ruleContent"] = .string(content) }
+        return .object([
+            "type": .string("addRules"), "behavior": .string("allow"),
+            "destination": .string(destination), "rules": .array([.object(rule)]),
+        ])
     }
 
     /// Drops `message` into the inbox the way the helper does.
@@ -170,7 +181,8 @@ final class SessionQueueTests: XCTestCase {
         let store = AgentSessionStore(fileURL: file)
         store.apply(fixture.update(.stop, session: "a", request: "request-a1", pid: 100))
         store.apply(fixture.update(.permission, session: "b", request: "request-b1", pid: 200))
-        store.setBypassed(true, sessionId: "b")
+        store.setBypassed(sessionId: "b", bypass: AgentBypass(cliPid: 100, agent: .claude, project: "app"))
+        store.setBypassed(sessionId: "c", bypass: AgentBypass(cliPid: 300, agent: .codex, project: nil))
         store.setStatus(.sending, requestId: "request-a1")
         XCTAssertEqual(try fixture.mode(file), 0o600)
 
@@ -179,7 +191,7 @@ final class SessionQueueTests: XCTestCase {
         XCTAssertEqual(relaunched.sessions.map(\.requestId), ["request-a1"])
         XCTAssertEqual(relaunched.current?.status, .completed, "a send cut off by quitting is shown again")
         XCTAssertEqual(relaunched.current?.message, "Done.")
-        XCTAssertEqual(relaunched.bypassed, ["b"])
+        XCTAssertEqual(Array(relaunched.bypassed.keys), ["b"], "a bypass whose CLI exited does not come back")
     }
 
     func testPruneDropsDeadHelpersAndExpiresLinkRequests() throws {
@@ -352,23 +364,64 @@ final class SessionQueueTests: XCTestCase {
         XCTAssertEqual(fixture.toasts.last, "Couldn't reach Codex. Answer in the terminal instead.")
     }
 
-    func testBypassWritesMarkerAndApprovesLaterRequests() async throws {
+    func testBypassIsBoundToTheCLIProcessAndKeepsTheBadgeUp() async throws {
         let fixture = makeFixture()
-        fixture.bridge.ingest(fixture.update(.permission, session: "a", request: "request-a1"))
-        await fixture.bridge.respond(.bypass)
+        fixture.bridge.ingest(fixture.update(.permission, session: "a", request: "request-a1", cliPid: 102))
+        XCTAssertTrue(fixture.bridge.canBypass(try XCTUnwrap(fixture.bridge.currentSession)))
+        await fixture.bridge.respond(.bypass, explicit: true)
         XCTAssertEqual(try fixture.response(for: "request-a1")?.action, .bypass)
         XCTAssertTrue(fixture.bridge.isBypassed("a"))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.paths.bypassMarker(sessionId: "a").path))
+        let marker = fixture.paths.bypassMarker(sessionId: "a")
+        XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), "102\n", "the marker names the CLI process")
+        XCTAssertEqual(fixture.paths.bypassOwner(sessionId: "a"), 102)
 
-        // A request that raced the marker is approved without showing.
-        fixture.bridge.ingest(fixture.update(.permission, session: "a", request: "request-a2"))
+        // No request waits, but the badge must stay in view.
+        XCTAssertNil(fixture.bridge.currentSession)
+        XCTAssertTrue(fixture.panel.isVisible)
+        XCTAssertEqual(fixture.bridge.activeBypasses.map(\.bypass.label), ["Claude Code in app"])
+
+        // A request from the same CLI process is approved without showing.
+        fixture.bridge.ingest(fixture.update(.permission, session: "a", request: "request-a2", cliPid: 102))
         await fixture.settle { (try? fixture.response(for: "request-a2")) != nil }
         XCTAssertEqual(try fixture.response(for: "request-a2")?.action, .allow)
         XCTAssertNil(fixture.bridge.currentSession)
 
+        // The same session id from another process (a resumed session) asks.
+        fixture.bridge.ingest(fixture.update(.permission, session: "a", request: "request-a3", cliPid: 103))
+        await fixture.settle { false }
+        XCTAssertNil(try fixture.response(for: "request-a3"))
+        XCTAssertEqual(fixture.bridge.currentSession?.requestId, "request-a3")
+        await fixture.bridge.respond(.deny)
+
+        // Revoking removes the marker and, with nothing left, the panel.
         fixture.bridge.setBypass(false, sessionId: "a")
         XCTAssertFalse(fixture.bridge.isBypassed("a"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertFalse(fixture.panel.isVisible)
+    }
+
+    func testBypassEndsWhenTheCLIExits() async throws {
+        let fixture = makeFixture()
+        fixture.bridge.ingest(fixture.update(.permission, session: "a", request: "request-a1", cliPid: 102))
+        await fixture.bridge.respond(.bypass, explicit: true)
+        XCTAssertTrue(fixture.bridge.isBypassed("a"))
+        fixture.alive.remove(102)
+        fixture.bridge.tick()
+        XCTAssertFalse(fixture.bridge.isBypassed("a"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.paths.bypassMarker(sessionId: "a").path))
+        XCTAssertFalse(fixture.panel.isVisible)
+    }
+
+    func testBypassNeedsAWatchableCLI() async throws {
+        let fixture = makeFixture()
+        fixture.bridge.ingest(fixture.update(.permission, session: "a", request: "request-a1", cliPid: nil))
+        let session = try XCTUnwrap(fixture.bridge.currentSession)
+        XCTAssertFalse(fixture.bridge.canBypass(session))
+        let outcome = await fixture.bridge.respond(.bypass, explicit: true)
+        XCTAssertEqual(outcome, .refused)
+        XCTAssertFalse(fixture.bridge.isBypassed("a"))
+        fixture.bridge.setBypass(true, sessionId: "a")
+        XCTAssertFalse(fixture.bridge.isBypassed("a"), "no process id, no bypass")
     }
 
     func testCLIBypassModeShowsTheBadge() {
@@ -377,6 +430,48 @@ final class SessionQueueTests: XCTestCase {
         update.permissionMode = "bypassPermissions"
         fixture.bridge.ingest(update)
         XCTAssertTrue(fixture.bridge.isBypassed("a"))
+    }
+
+    // MARK: - Narrow Grants
+
+    func testBroadSuggestionsHideAlwaysAllow() async throws {
+        let fixture = makeFixture()
+        let broad = [
+            fixture.suggestion("Bash", nil), fixture.suggestion("Bash", "*"), fixture.suggestion("Bash", "npm:*"),
+            .object(["type": .string("setMode"), "mode": .string("acceptEdits"), "destination": .string("session")]),
+            .object(["type": .string("addDirectories"), "directories": .array([.string("/")]), "destination": .string("localSettings")]),
+        ]
+        fixture.bridge.ingest(fixture.update(.permission, session: "a", request: "request-a1", suggestions: broad))
+        let session = try XCTUnwrap(fixture.bridge.currentSession)
+        XCTAssertNil(fixture.bridge.alwaysAllowRule(for: session))
+        XCTAssertNil(fixture.bridge.sessionRule(for: session))
+        let always = await fixture.bridge.respond(.allowAlways, suggestionIndex: 0, explicit: true)
+        XCTAssertEqual(always, .refused)
+        let sessionGrant = await fixture.bridge.respond(.allowSession, explicit: true)
+        XCTAssertEqual(sessionGrant, .refused)
+        XCTAssertNil(try fixture.response(for: "request-a1"))
+    }
+
+    func testSpecificSuggestionShowsItsExactRule() async throws {
+        let fixture = makeFixture()
+        let suggestions = [fixture.suggestion("Bash", nil), fixture.suggestion("Bash", "npm run test:*")]
+        fixture.bridge.ingest(fixture.update(.permission, session: "a", request: "request-a1", suggestions: suggestions))
+        let session = try XCTUnwrap(fixture.bridge.currentSession)
+        let rule = try XCTUnwrap(fixture.bridge.alwaysAllowRule(for: session))
+        XCTAssertEqual(rule.index, 1)
+        XCTAssertEqual(rule.text, "Bash(npm run test:*)")
+        XCTAssertEqual(fixture.bridge.sessionRule(for: session)?.text, "Bash(npm run test:*)")
+
+        await fixture.bridge.respond(.allowAlways, suggestionIndex: rule.index, explicit: true)
+        XCTAssertEqual(try fixture.response(for: "request-a1"), AgentHookResponse(requestId: "request-a1", action: .allowAlways, suggestionIndex: 1))
+    }
+
+    func testCodexOffersNoSavedRules() throws {
+        let fixture = makeFixture()
+        fixture.bridge.ingest(fixture.update(.permission, session: "a", request: "request-a1", agent: .codex, suggestions: [fixture.suggestion("Bash", "npm test")]))
+        let session = try XCTUnwrap(fixture.bridge.currentSession)
+        XCTAssertNil(fixture.bridge.alwaysAllowRule(for: session))
+        XCTAssertTrue(fixture.bridge.canBypass(session), "Parrot's own bypass works for Codex too")
     }
 
     func testDisableForSessionWritesMarker() async throws {
@@ -388,17 +483,28 @@ final class SessionQueueTests: XCTestCase {
         XCTAssertNil(fixture.bridge.currentSession)
     }
 
-    func testSpokenAllowAndDenyAnswerPermissions() async throws {
+    func testSpeechNeverApprovesAPermission() async throws {
         let fixture = makeFixture()
         fixture.bridge.ingest(fixture.update(.permission, session: "a", request: "request-a1"))
-        await fixture.bridge.receiveDictation("Allow.")
+        await fixture.bridge.receiveDictation("Allow.", autoSend: true)
+        XCTAssertEqual(fixture.bridge.draft, "Allow.")
+        XCTAssertTrue(fixture.bridge.draftSaysAllow)
+        await fixture.bridge.sendDraft()
+        XCTAssertNil(try fixture.response(for: "request-a1"), "a spoken allow waits for the Allow button")
+        await fixture.bridge.respond(.allow, explicit: true)
         XCTAssertEqual(try fixture.response(for: "request-a1")?.action, .allow)
 
+        // A spoken deny is a denial without a message, but only on Send or Deny.
         fixture.bridge.ingest(fixture.update(.permission, session: "b", request: "request-b1"))
-        await fixture.bridge.receiveDictation("Use the staging database instead")
-        XCTAssertEqual(fixture.bridge.draft, "Use the staging database instead")
+        await fixture.bridge.receiveDictation("deny")
+        XCTAssertNil(try fixture.response(for: "request-b1"))
         await fixture.bridge.sendDraft()
-        XCTAssertEqual(try fixture.response(for: "request-b1"), AgentHookResponse(requestId: "request-b1", action: .deny, text: "Use the staging database instead"))
+        XCTAssertEqual(try fixture.response(for: "request-b1"), AgentHookResponse(requestId: "request-b1", action: .deny))
+
+        fixture.bridge.ingest(fixture.update(.permission, session: "c", request: "request-c1"))
+        await fixture.bridge.receiveDictation("Use the staging database instead")
+        await fixture.bridge.sendDraft()
+        XCTAssertEqual(try fixture.response(for: "request-c1"), AgentHookResponse(requestId: "request-c1", action: .deny, text: "Use the staging database instead"))
     }
 
     func testPlanApproveAndFeedback() async throws {
@@ -520,10 +626,42 @@ final class SessionQueueTests: XCTestCase {
         XCTAssertEqual(try fixture.response(for: "request-l1"), AgentHookResponse(requestId: "request-l1", action: .allow))
     }
 
+    func testLinkWithBypassModeChangesNothing() async throws {
+        let fixture = makeFixture()
+        let url = try XCTUnwrap(URL(string: "parrot://agent-update?request=request-l1&agent=claude&event=permission&session=a&permissionMode=bypassPermissions&permission_mode=bypassPermissions"))
+        fixture.bridge.handle(url: url)
+        let session = try XCTUnwrap(fixture.bridge.currentSession)
+        XCTAssertFalse(session.trusted)
+        XCTAssertNil(session.permissionMode)
+        XCTAssertNil(session.cliPid)
+        XCTAssertEqual(session.linkedSessionId, "a")
+        XCTAssertTrue(fixture.bridge.activeBypasses.isEmpty, "a link never changes bypass state")
+        XCTAssertNil(fixture.bridge.alwaysAllowRule(for: session))
+        XCTAssertFalse(fixture.bridge.canBypass(session))
+        for action in [AgentHookResponse.Action.allowAlways, .bypass] {
+            let outcome = await fixture.bridge.respond(action, suggestionIndex: 0, explicit: true)
+            XCTAssertEqual(outcome, .refused)
+        }
+        XCTAssertNil(try fixture.response(for: "request-l1"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.paths.bypassMarker(sessionId: "a").path))
+    }
+
+    func testInboxRequestSupersedesTheLinkCard() throws {
+        let fixture = makeFixture()
+        fixture.bridge.handle(url: fixture.link(.stop, request: "request-l1", session: "a"))
+        fixture.bridge.handle(url: fixture.link(.stop, request: "request-l2", session: "b"))
+        fixture.bridge.ingest(fixture.update(.stop, session: "a", request: "request-a1"))
+        XCTAssertEqual(fixture.bridge.store.sessions.map(\.requestId), ["request-l2", "request-a1"])
+        // The user typing in b's terminal clears b's link card too.
+        fixture.bridge.ingest(.dismiss(agent: .claude, sessionId: "b", requestId: "", hookPid: nil))
+        XCTAssertEqual(fixture.bridge.store.sessions.map(\.requestId), ["request-a1"])
+    }
+
     func testLinkPlanNeedsAClickAndBypassedSessionsStayManual() async throws {
         let fixture = makeFixture()
         // A trusted session with bypass on does not make a link auto-approve.
-        fixture.bridge.setBypass(true, sessionId: "a")
+        fixture.bridge.setBypass(true, sessionId: "a", cliPid: 102)
+        XCTAssertTrue(fixture.bridge.isBypassed("a"))
         fixture.bridge.handle(url: fixture.link(.permission, request: "request-l1"))
         await fixture.settle { false }
         XCTAssertNil(try fixture.response(for: "request-l1"))

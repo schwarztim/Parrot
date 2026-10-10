@@ -95,6 +95,19 @@ struct AgentsSettingsView: View {
                         .disabled(!installer.helperExists)
                 }
             }
+            Toggle(isOn: Binding(
+                get: { appSettings.agent.stopHookEnabled(for: kind) },
+                set: { appSettings.agent.setStopHook($0, for: kind) }
+            )) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Reply when the turn ends")
+                    Text("\(kind.displayName) waits in the terminal while Parrot shows its message, up to the wait time above. Permissions and questions come to Parrot either way.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.leading, 28)
             if let message = messages[kind] {
                 Text(message)
                     .font(.caption)

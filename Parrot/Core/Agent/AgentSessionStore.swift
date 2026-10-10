@@ -39,6 +39,12 @@ struct AgentSession: Codable, Equatable, Identifiable, Sendable {
     var branch: String?
     var title: String?
     var hookPid: Int32?
+    /// The CLI process. Bypass is only offered when it is known, and ends
+    /// when it exits.
+    var cliPid: Int32?
+    /// For a link request: the session id the link named (display and
+    /// clean-up only; it never lets a link touch that session).
+    var linkedSessionId: String?
     var permissionMode: String?
     var permission: HookPermission?
     var questions: [HookQuestion]?
@@ -63,6 +69,7 @@ struct AgentSession: Codable, Equatable, Identifiable, Sendable {
         branch = update.branch
         title = update.title
         hookPid = update.hookPid
+        cliPid = update.cliPid
         permissionMode = update.permissionMode
         permission = update.permission
         questions = update.questions
@@ -70,7 +77,7 @@ struct AgentSession: Codable, Equatable, Identifiable, Sendable {
     }
 
     /// Text shown for a request that came by link.
-    static let detailsUnavailable = "Details unavailable. Open the terminal to see what the agent needs."
+    static let detailsUnavailable = "Open the terminal for details."
 
     /// A request that came by `parrot://` link: untrusted, details hidden.
     /// Keyed by its request id so it can never replace an inbox session.
@@ -78,6 +85,7 @@ struct AgentSession: Codable, Equatable, Identifiable, Sendable {
         guard link.kind == .update, let event = link.event else { return nil }
         agent = link.agent
         sessionId = Self.linkSessionId(link.requestId)
+        linkedSessionId = link.sessionId
         requestId = link.requestId
         self.event = event
         status = AgentSession.status(for: event)
@@ -101,6 +109,19 @@ struct AgentSession: Codable, Equatable, Identifiable, Sendable {
 
     /// "Claude Code", "Codex".
     var agentName: String { agent.displayName }
+}
+
+/// An active bypass: Parrot approves a session's permission requests while
+/// this CLI process runs.
+struct AgentBypass: Codable, Equatable, Sendable {
+    var cliPid: Int32
+    var agent: HookAgent
+    var project: String?
+
+    /// "Claude Code in parrot".
+    var label: String {
+        project.map { "\(agent.displayName) in \($0)" } ?? agent.displayName
+    }
 }
 
 // MARK: - Store
@@ -128,8 +149,9 @@ final class AgentSessionStore {
     }
 
     private(set) var sessions: [AgentSession] = []
-    /// Sessions whose permission requests Parrot approves itself.
-    private(set) var bypassed: Set<String> = []
+    /// Sessions whose permission requests Parrot approves itself, by
+    /// session id, each bound to the CLI process it was granted for.
+    private(set) var bypassed: [String: AgentBypass] = [:]
 
     @ObservationIgnored private let fileURL: URL?
 
@@ -160,14 +182,20 @@ final class AgentSessionStore {
         switch message.kind {
         case .update:
             guard let session = AgentSession(message: message, fullText: fullText) else { return .ignored }
+            // The real request supersedes a link card for the same session.
+            sessions.removeAll { !$0.trusted && $0.linkedSessionId == session.sessionId }
             return insert(session)
         case .dismiss:
             // An empty request id means "anything for this session" (the user
-            // typed in the terminal). Otherwise only that exact request goes,
-            // so a late dismiss never removes a newer request.
+            // typed in the terminal), link cards for it included. Otherwise
+            // only that exact request goes, so a late dismiss never removes a
+            // newer request.
             let before = sessions.count
             sessions.removeAll {
-                $0.trusted && $0.sessionId == message.sessionId
+                if !$0.trusted {
+                    return message.requestId.isEmpty && $0.linkedSessionId == message.sessionId
+                }
+                return $0.sessionId == message.sessionId
                     && (message.requestId.isEmpty || $0.requestId == message.requestId)
             }
             guard sessions.count != before else { return .ignored }
@@ -237,13 +265,21 @@ final class AgentSessionStore {
         return dead
     }
 
-    func setBypassed(_ on: Bool, sessionId: String) {
-        if on {
-            bypassed.insert(sessionId)
-        } else {
-            bypassed.remove(sessionId)
-        }
+    /// Turns bypass on for `sessionId`, or off (`nil`).
+    func setBypassed(sessionId: String, bypass: AgentBypass?) {
+        bypassed[sessionId] = bypass
         save()
+    }
+
+    /// Ends every bypass whose CLI process has exited and returns the
+    /// session ids.
+    @discardableResult
+    func pruneBypass(isAlive: (Int32) -> Bool) -> [String] {
+        let ended = bypassed.filter { !isAlive($0.value.cliPid) }.map(\.key).sorted()
+        guard !ended.isEmpty else { return [] }
+        for id in ended { bypassed[id] = nil }
+        save()
+        return ended
     }
 
     func removeAll() {
@@ -255,17 +291,18 @@ final class AgentSessionStore {
 
     private struct Snapshot: Codable {
         var sessions: [AgentSession]
-        var bypassed: [String]
+        var bypassed: [String: AgentBypass]
     }
 
     func save() {
         guard let fileURL else { return }
-        let snapshot = Snapshot(sessions: sessions, bypassed: bypassed.sorted())
+        let snapshot = Snapshot(sessions: sessions, bypassed: bypassed)
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         try? AgentHookPaths.writeAtomically(data, to: fileURL)
     }
 
-    /// Reloads the saved queue, keeping only sessions whose helper still runs.
+    /// Reloads the saved queue, keeping only sessions whose helper still
+    /// runs and bypasses whose CLI still runs.
     func load(isAlive: (Int32) -> Bool) {
         guard let fileURL, let data = try? Data(contentsOf: fileURL),
               let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data)
@@ -274,7 +311,7 @@ final class AgentSessionStore {
             guard let pid = session.hookPid else { return false }
             return isAlive(pid)
         }
-        bypassed = Set(snapshot.bypassed)
+        bypassed = snapshot.bypassed.filter { isAlive($0.value.cliPid) }
         for index in sessions.indices where sessions[index].status == .sending {
             sessions[index].status = AgentSession.status(for: sessions[index].event)
         }

@@ -96,8 +96,8 @@ func writeInbox(_ message: AgentInboxMessage) -> URL? {
 }
 
 /// Tells Parrot through a `parrot://` link, the fallback when the inbox
-/// cannot be written. The link holds only ids and names. Waits at most five
-/// seconds for the opener.
+/// cannot be written. The link holds only the request id, event, agent,
+/// project and session id. Waits at most five seconds for the opener.
 func openDeepLink(_ message: AgentInboxMessage) {
     guard let url = AgentDeepLink(message: message).url else { return }
     let process = Process()
@@ -137,8 +137,15 @@ guard let event = input.event(for: agent) else { finish() }
 
 guard let state = loadState(), appIsListening(state) else { finish() }
 
-// Parrot's per-session bypass: allow without asking.
-if event == .permission, markerExists(paths.bypassMarker(sessionId: input.sessionId)) {
+// Replying when the turn ends is opt-in per CLI (the Agents tab).
+if event == .stop, !(state.stopAgents ?? []).contains(agent) { finish() }
+
+let cliPid = AgentHookProcess.cliPid()
+
+// Parrot's per-session bypass: allow without asking, only while the CLI
+// process the user bypassed is the one asking.
+if event == .permission, markersTrusted, let cliPid,
+   paths.bypassOwner(sessionId: input.sessionId) == cliPid {
     finish(HookDecision.output(
         agent: agent, event: event, input: input,
         response: AgentHookResponse(requestId: "", action: .allow)
@@ -153,7 +160,7 @@ ownFiles.append(responseFile)
 
 var update = AgentInboxMessage.update(
     agent: agent, event: event, input: input, requestId: requestId, hookPid: pid,
-    branch: input.cwd.flatMap(AgentHookGit.branch(at:))
+    branch: input.cwd.flatMap(AgentHookGit.branch(at:)), cliPid: cliPid
 )
 if let text = update.message, text.count > AgentInboxMessage.inlineLimit,
    AgentHookPaths.secureDirectory(paths.messages, create: true) == .secure,

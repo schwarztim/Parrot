@@ -69,7 +69,7 @@ final class AgentBridge {
         panel = AgentPanelController(bridge: self, services: services)
         observeSettings()
         startWatching()
-        if isEnabled, store.current != nil { showPanel(activate: false) }
+        if isEnabled { sessionsChanged() }
     }
 
     /// Points the bridge at a root folder and loads the saved queue. `start`
@@ -119,10 +119,37 @@ final class AgentBridge {
     /// for a link request: a page opening a link must not capture speech.
     var isAcceptingDictation: Bool { isWaiting && panelVisible && store.current?.trusted == true }
 
-    func isBypassed(_ sessionId: String) -> Bool { store.bypassed.contains(sessionId) }
+    func isBypassed(_ sessionId: String) -> Bool { store.bypassed[sessionId] != nil }
+
+    // MARK: - Grants Offered for a Request
+
+    /// The suggestion "Always Allow" saves and its exact rule text, or nil
+    /// when none is narrow enough (the button is then hidden).
+    func alwaysAllowRule(for session: AgentSession) -> (index: Int, text: String)? {
+        guard session.trusted, let permission = session.permission, permission.canUpdatePermissions,
+              let index = HookPermissionRules.alwaysAllowIndex(in: permission.suggestions),
+              let text = HookPermissionRules.text(of: permission.suggestions[index])
+        else { return nil }
+        return (index, text)
+    }
+
+    /// The suggestion "Allow for This Session" grants and its rule text.
+    func sessionRule(for session: AgentSession) -> (index: Int, text: String)? {
+        guard session.trusted, let permission = session.permission, permission.canUpdatePermissions,
+              let index = HookPermissionRules.sessionIndex(in: permission.suggestions),
+              let text = HookPermissionRules.text(of: permission.suggestions[index])
+        else { return nil }
+        return (index, text)
+    }
+
+    /// Bypass needs a trusted request from a CLI process Parrot can watch,
+    /// so it ends when that process exits.
+    func canBypass(_ session: AgentSession) -> Bool {
+        session.trusted && session.event == .permission && session.cliPid.map(isProcessAlive) == true
+    }
 
     func showPanel(activate: Bool = true) {
-        guard store.current != nil else { return }
+        guard store.current != nil || !store.bypassed.isEmpty else { return }
         panel?.show(activate: activate)
         panelVisible = panel?.isVisible ?? false
     }
@@ -192,11 +219,16 @@ final class AgentBridge {
         diagLog("[Parrot:Agent] \(message.agent.rawValue) \(message.kind.rawValue) \(message.event?.rawValue ?? "") -> \(change)")
         guard change != .ignored else { return }
 
-        if message.kind == .update, message.permissionMode == "bypassPermissions", !store.bypassed.contains(message.sessionId) {
-            setBypass(true, sessionId: message.sessionId)
+        // Only an inbox message can carry bypass state: the CLI reports it
+        // runs in bypass mode. Bound to its process like any bypass.
+        if message.kind == .update, message.permissionMode == "bypassPermissions",
+           !isBypassed(message.sessionId), let cliPid = message.cliPid, isProcessAlive(cliPid) {
+            setBypass(true, sessionId: message.sessionId, cliPid: cliPid, agent: message.agent, project: message.project)
         }
-        // A bypassed session's permission request is approved at once.
-        if message.kind == .update, message.event == .permission, store.bypassed.contains(message.sessionId) {
+        // A bypassed session's permission request is approved at once, if
+        // it comes from the same CLI process.
+        if message.kind == .update, message.event == .permission,
+           let bypass = store.bypassed[message.sessionId], bypass.cliPid == message.cliPid {
             let requestId = message.requestId
             Task { await self.respond(.allow, requestId: requestId) }
             return
@@ -205,9 +237,11 @@ final class AgentBridge {
     }
 
     /// Keeps the panel and its editor in step with the queue.
+    /// The panel stays up while a session waits or a bypass is active (its
+    /// badge must stay visible), and closes when neither is left.
     private func sessionsChanged() {
         resetPanelState()
-        if store.current == nil {
+        if store.current == nil, store.bypassed.isEmpty {
             if panelVisible { hidePanel(restoreFocus: true) }
         } else if !panelVisible {
             showPanel(activate: false)
@@ -235,12 +269,19 @@ final class AgentBridge {
     static let clickOnlyActions: Set<AgentHookResponse.Action> = [.allow, .approvePlan]
 
     /// Whether `action` may be sent for `session` (`explicit`: the user
-    /// clicked the button for it).
-    static func allows(_ action: AgentHookResponse.Action, for session: AgentSession, explicit: Bool) -> Bool {
-        guard !session.trusted else { return true }
-        if trustedOnlyActions.contains(action) { return false }
-        if clickOnlyActions.contains(action) { return explicit }
-        return true
+    /// clicked the button or pressed its shortcut).
+    func allows(_ action: AgentHookResponse.Action, for session: AgentSession, explicit: Bool) -> Bool {
+        if !session.trusted {
+            if Self.trustedOnlyActions.contains(action) { return false }
+            if Self.clickOnlyActions.contains(action) { return explicit }
+            return true
+        }
+        switch action {
+        case .allowAlways: return alwaysAllowRule(for: session) != nil
+        case .allowSession: return sessionRule(for: session) != nil
+        case .bypass: return canBypass(session)
+        default: return true
+        }
     }
 
     /// Sends `action` for the shown session (or `requestId`), then drops
@@ -260,8 +301,8 @@ final class AgentBridge {
         guard let session = requestId.map({ store.session(requestId: $0) }) ?? store.current,
               let delivery, let paths = hookPaths
         else { return nil }
-        guard Self.allows(action, for: session, explicit: explicit) else {
-            diagLog("[Parrot:Agent] Refused \(action.rawValue) for a request that came by link")
+        guard allows(action, for: session, explicit: explicit) else {
+            diagLog("[Parrot:Agent] Refused \(action.rawValue) (trusted: \(session.trusted))")
             return .refused
         }
         store.setStatus(.sending, requestId: session.requestId)
@@ -281,7 +322,9 @@ final class AgentBridge {
             response, to: alive ? paths.responseFile(requestId: session.requestId) : nil,
             fallbackText: fallback, agentName: session.agentName
         )
-        if action == .bypass { setBypass(true, sessionId: session.sessionId) }
+        if action == .bypass {
+            setBypass(true, sessionId: session.sessionId, cliPid: session.cliPid, agent: session.agent, project: session.project)
+        }
         store.remove(requestId: session.requestId)
         sessionsChanged()
         return outcome
@@ -307,7 +350,9 @@ final class AgentBridge {
         case .plan:
             await respond(text.isEmpty ? .approvePlan : .rejectPlan, text: text.isEmpty ? nil : text)
         case .permission:
-            await respond(.deny, text: text.isEmpty ? nil : text)
+            // Never an approval: a spoken "allow" waits for the Allow button.
+            guard !draftSaysAllow else { return }
+            await respond(.deny, text: Self.denialMessage(text))
         case .question:
             if !text.isEmpty { elicitation?.setFreeText(text) }
             await sendAnswers()
@@ -347,25 +392,52 @@ final class AgentBridge {
     /// until the user types "enable parrot" in the terminal.
     func disableCurrentSession() async {
         guard let session = store.current, let paths = hookPaths else { return }
-        writeMarker(paths.disabledMarker(sessionId: session.sessionId), present: true)
+        // A link names no session Parrot can trust; just let it go.
+        if session.trusted {
+            writeMarker(paths.disabledMarker(sessionId: session.sessionId), present: true)
+        }
         await respond(.dismiss, requestId: session.requestId)
         store.remove(sessionId: session.sessionId)
         sessionsChanged()
     }
 
-    /// Turns Parrot's bypass on or off for a session. On, the helper allows
-    /// that session's permission requests without asking.
-    func setBypass(_ on: Bool, sessionId: String) {
-        store.setBypassed(on, sessionId: sessionId)
+    /// Turns Parrot's bypass on (bound to the CLI process `cliPid`) or off
+    /// for a session. On, the helper allows that session's permission
+    /// requests without asking while that process asks. Without a process
+    /// id it stays off: a bypass must be able to end.
+    func setBypass(_ on: Bool, sessionId: String, cliPid: Int32? = nil, agent: HookAgent = .claude, project: String? = nil) {
+        let bypass = on ? cliPid.map { AgentBypass(cliPid: $0, agent: agent, project: project) } : nil
+        guard !on || bypass != nil else { return }
+        store.setBypassed(sessionId: sessionId, bypass: bypass)
         if let paths = hookPaths {
-            writeMarker(paths.bypassMarker(sessionId: sessionId), present: on)
+            writeMarker(paths.bypassMarker(sessionId: sessionId), present: on, contents: bypass.map { "\($0.cliPid)\n" } ?? "")
         }
+        sessionsChanged()
+    }
+
+    /// Active bypasses, for the panel's badges and the mini recorder.
+    var activeBypasses: [(sessionId: String, bypass: AgentBypass)] {
+        store.bypassed.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
     }
 
     // MARK: - Dictation
 
-    private static let allowWords: Set<String> = ["allow", "yes", "approve", "allow it", "yes allow", "go ahead", "ok", "okay"]
-    private static let denyWords: Set<String> = ["deny", "no", "reject", "deny it", "don't", "do not"]
+    static let allowWords: Set<String> = ["allow", "yes", "approve", "allow it", "yes allow", "go ahead", "ok", "okay"]
+    static let denyWords: Set<String> = ["deny", "no", "reject", "deny it", "don t", "do not"]
+
+    /// The message a denial carries: the draft, unless it is only a spoken
+    /// allow or deny word.
+    static func denialMessage(_ draft: String) -> String? {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let said = AgentElicitation.normalize(text)
+        guard !text.isEmpty, !allowWords.contains(said), !denyWords.contains(said) else { return nil }
+        return text
+    }
+
+    /// The draft is a spoken allow (the panel then points at the Allow button).
+    var draftSaysAllow: Bool {
+        Self.allowWords.contains(AgentElicitation.normalize(draft))
+    }
 
     /// A finished dictation for the shown session. Returns false when no
     /// session is waiting (the caller then delivers the text normally).
@@ -380,15 +452,9 @@ final class AgentBridge {
             appendToDraft(trimmed)
             if autoSend, session.event == .stop { await sendDraft() }
         case .permission:
-            let said = AgentElicitation.normalize(trimmed)
-            if Self.allowWords.contains(said) {
-                // A link request needs a click; speech is refused there.
-                await respond(.allow)
-            } else if Self.denyWords.contains(said) {
-                await respond(.deny)
-            } else {
-                appendToDraft(trimmed)
-            }
+            // Speech only fills the editor. Approving or denying always
+            // takes a click on Allow or Deny (or Cmd+Return for Allow).
+            appendToDraft(trimmed)
         case .question:
             guard var state = elicitation else {
                 appendToDraft(trimmed)
@@ -440,6 +506,12 @@ final class AgentBridge {
         let dead = store.pruneDeadProcesses(isAlive: isProcessAlive, now: now, maxAge: maxAge)
         for session in dead { delivery?.cancel(requestId: session.requestId) }
         if !dead.isEmpty { sessionsChanged() }
+        // A bypass ends with its CLI process.
+        let ended = store.pruneBypass(isAlive: isProcessAlive)
+        for sessionId in ended {
+            if let paths = hookPaths { writeMarker(paths.bypassMarker(sessionId: sessionId), present: false) }
+        }
+        if !ended.isEmpty { sessionsChanged() }
         sweepOrphans(now: now)
     }
 
@@ -467,6 +539,8 @@ final class AgentBridge {
         withObservationTracking {
             _ = settings.enabled
             _ = settings.responseTimeout
+            _ = settings.claudeStopHook
+            _ = settings.codexStopHook
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.settingsChanged()
@@ -485,13 +559,15 @@ final class AgentBridge {
         }
     }
 
-    /// Tells the helper whether Parrot is listening and how long to wait.
+    /// Tells the helper whether Parrot is listening, how long to wait, and
+    /// which CLIs' Stop events to answer.
     func writeHookState() {
         guard let paths = hookPaths else { return }
         let state = AgentHookState(
             enabled: isEnabled,
             appPid: ProcessInfo.processInfo.processIdentifier,
-            responseTimeout: settings?.clampedResponseTimeout ?? 300
+            responseTimeout: settings?.clampedResponseTimeout ?? 300,
+            stopAgents: settings?.stopHookAgents ?? []
         )
         guard let data = try? JSONEncoder().encode(state) else { return }
         try? AgentHookPaths.writeAtomically(data, to: paths.stateFile)
@@ -499,13 +575,13 @@ final class AgentBridge {
 
     /// Creates or removes a session marker. The control folder must pass
     /// the same 0700, owner and no-symlink check the helper makes.
-    private func writeMarker(_ url: URL, present: Bool) {
+    private func writeMarker(_ url: URL, present: Bool, contents: String = "") {
         guard AgentHookPaths.secureDirectory(url.deletingLastPathComponent(), create: true) == .secure else {
             diagLog("[Parrot:Agent] Control folder is not private; marker not written")
             return
         }
         if present {
-            try? AgentHookPaths.writeAtomically(Data(), to: url)
+            try? AgentHookPaths.writeAtomically(Data(contents.utf8), to: url)
         } else {
             try? FileManager.default.removeItem(at: url)
         }

@@ -97,12 +97,20 @@ final class AgentRoundTripTests: XCTestCase {
         _ arguments: [String],
         stdin: String,
         timeout: Int = 15,
+        viaShell: Bool = false,
         answer: ((Request) -> AgentHookResponse?)? = nil,
         readRequest: (() throws -> Request?)? = nil
     ) throws -> HookRun {
         let process = Process()
-        process.executableURL = try Self.helper()
-        process.arguments = arguments
+        if viaShell {
+            // Like a command hook: the CLI runs a shell, the shell runs the
+            // helper (the trailing `true` keeps sh from exec'ing it).
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            process.arguments = ["-c", "'\(try Self.helper().path)' \(arguments.joined(separator: " ")); true"]
+        } else {
+            process.executableURL = try Self.helper()
+            process.arguments = arguments
+        }
         process.environment = [
             "HOME": temp.path,
             "PATH": "/usr/bin:/bin",
@@ -186,8 +194,8 @@ final class AgentRoundTripTests: XCTestCase {
         return nil
     }
 
-    private func writeState(enabled: Bool, pid: Int32) throws {
-        let state = AgentHookState(enabled: enabled, appPid: pid, responseTimeout: 30)
+    private func writeState(enabled: Bool, pid: Int32, stopAgents: [HookAgent] = HookAgent.allCases) throws {
+        let state = AgentHookState(enabled: enabled, appPid: pid, responseTimeout: 30, stopAgents: stopAgents)
         try AgentHookPaths.writeAtomically(try JSONEncoder().encode(state), to: paths.stateFile)
     }
 
@@ -225,6 +233,7 @@ final class AgentRoundTripTests: XCTestCase {
         XCTAssertEqual(message.branch, "main")
         XCTAssertEqual(message.message, "I've completed the refactoring.\nHere's a summary...")
         XCTAssertGreaterThan(message.hookPid ?? 0, 0)
+        XCTAssertEqual(message.cliPid, getpid(), "the process that ran the helper")
         XCTAssertTrue(AgentInboxMessage.isValidRequestId(message.requestId))
 
         XCTAssertEqual(result.exitCode, 0)
@@ -371,12 +380,54 @@ final class AgentRoundTripTests: XCTestCase {
         XCTAssertEqual(try inboxMessages().count, 0)
     }
 
-    func testBypassMarkerAllowsWithoutAsking() throws {
+    func testBypassMarkerAllowsOnlyForItsCLIProcess() throws {
         XCTAssertEqual(AgentHookPaths.secureDirectory(paths.controlDir, create: true), .secure)
-        FileManager.default.createFile(atPath: paths.bypassMarker(sessionId: "abc123").path, contents: Data())
-        let result = try run(["claude"], stdin: HookPayloadTests.claudePermission)
-        XCTAssertEqual(try object(result.stdout)["hookSpecificOutput"]?["decision"]?["behavior"]?.stringValue, "allow")
+        let marker = paths.bypassMarker(sessionId: "abc123")
+
+        // Bound to this process (the helper's CLI here): allowed at once,
+        // also through a shell, as a command hook runs it.
+        try AgentHookPaths.writeAtomically(Data("\(getpid())\n".utf8), to: marker)
+        for viaShell in [false, true] {
+            let result = try run(["claude"], stdin: HookPayloadTests.claudePermission, viaShell: viaShell)
+            XCTAssertEqual(try object(result.stdout)["hookSpecificOutput"]?["decision"]?["behavior"]?.stringValue, "allow", "viaShell \(viaShell)")
+            XCTAssertEqual(try inboxMessages().count, 0)
+        }
+
+        // Bound to another (ended) CLI process, or empty: the bypass is
+        // over, so Parrot is asked as usual.
+        for contents in ["1\n", ""] {
+            try AgentHookPaths.writeAtomically(Data(contents.utf8), to: marker)
+            let result = try run(["claude"], stdin: HookPayloadTests.claudePermission, timeout: 1)
+            XCTAssertEqual(result.stdout, "")
+            XCTAssertEqual(try inboxMessages().map(\.kind), [.dismiss], "it asked, then gave up")
+            try FileManager.default.removeItem(at: paths.inbox)
+        }
+    }
+
+    func testStopIsOptInPerCLI() throws {
+        try writeState(enabled: true, pid: getpid(), stopAgents: [.claude])
+        let codex = try run(["codex"], stdin: HookPayloadTests.codexStop)
+        XCTAssertEqual(codex.stdout, "")
+        XCTAssertLessThan(codex.seconds, 5)
+        XCTAssertEqual(try inboxMessages().count, 0, "Codex Stop not opted in")
+
+        // Permission requests still come through for that CLI.
+        let permission = try run(["codex"], stdin: HookPayloadTests.codexPermission) { request in
+            AgentHookResponse(requestId: request.requestId, action: .deny)
+        }
+        XCTAssertEqual(permission.message?.event, .permission)
+
+        try writeState(enabled: true, pid: getpid(), stopAgents: [])
+        let claude = try run(["claude"], stdin: HookPayloadTests.claudeStop)
+        XCTAssertEqual(claude.stdout, "")
         XCTAssertEqual(try inboxMessages().count, 0)
+    }
+
+    func testShellWrappedHookReportsTheCLIProcess() throws {
+        let result = try run(["claude"], stdin: HookPayloadTests.claudeStop, viaShell: true) { request in
+            AgentHookResponse(requestId: request.requestId, action: .dismiss)
+        }
+        XCTAssertEqual(result.message?.cliPid, getpid(), "the shell in between is skipped")
     }
 
     func testAppNotListeningExitsAtOnce() throws {
@@ -426,9 +477,10 @@ final class AgentRoundTripTests: XCTestCase {
         let url = try XCTUnwrap(link)
         XCTAssertEqual(url.host(), "agent-update")
         let names = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.map(\.name).sorted()
-        XCTAssertEqual(names, ["agent", "event", "project", "request"])
+        XCTAssertEqual(names, ["agent", "event", "project", "request", "session"])
         XCTAssertFalse(url.absoluteString.contains("refactoring"), "no agent message in the link")
-        XCTAssertFalse(url.absoluteString.contains("abc123"), "no session id in the link")
+        XCTAssertFalse(url.absoluteString.contains("summary"), "no agent message in the link")
+        XCTAssertFalse(url.absoluteString.contains("Users"), "no path in the link")
     }
 
     func testEnablePhraseClearsTheDisabledMarker() throws {

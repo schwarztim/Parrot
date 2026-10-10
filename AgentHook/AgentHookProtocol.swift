@@ -310,6 +310,8 @@ struct AgentInboxMessage: Codable, Equatable, Sendable {
     var title: String?
     /// The helper's process id. Parrot drops the request when it exits.
     var hookPid: Int32?
+    /// The CLI process that ran the helper. A bypass ends when it exits.
+    var cliPid: Int32?
     var permissionMode: String?
     var permission: HookPermission?
     var questions: [HookQuestion]?
@@ -333,13 +335,14 @@ struct AgentInboxMessage: Codable, Equatable, Sendable {
         input: HookInput,
         requestId: String,
         hookPid: Int32,
-        branch: String?
+        branch: String?,
+        cliPid: Int32? = nil
     ) -> AgentInboxMessage {
         var message = AgentInboxMessage(
             kind: .update, agent: agent, sessionId: input.sessionId, requestId: requestId,
             event: event, cwd: input.cwd,
             project: input.cwd.map { URL(fileURLWithPath: $0).lastPathComponent },
-            branch: branch, title: input.sessionTitle, hookPid: hookPid,
+            branch: branch, title: input.sessionTitle, hookPid: hookPid, cliPid: cliPid,
             permissionMode: input.permissionMode, createdAt: Date().timeIntervalSince1970
         )
         switch event {
@@ -386,32 +389,43 @@ struct AgentInboxMessage: Codable, Equatable, Sendable {
 
 // MARK: - Fallback Link (helper to app, untrusted)
 
-/// `parrot://agent-update?request=<id>&agent=<cli>&event=<kind>&project=<name>`,
+/// `parrot://agent-update?request=<id>&agent=<cli>&event=<kind>&project=<name>&session=<id>`,
 /// the fallback when the inbox cannot be written (or agent-dismiss).
 ///
-/// It carries no message, tool input, session id or path: URLs land in
-/// system logs. Any page or process can open one, so the app shows such a
-/// request with "details unavailable" and limits what it can answer.
+/// It carries no message, tool input, permission mode or path: URLs land
+/// in system logs. Any page or process can open one, so the app marks such
+/// a request untrusted, shows "Open the terminal for details" and limits
+/// what it can answer.
 struct AgentDeepLink: Equatable, Sendable {
     var kind: AgentInboxMessage.Kind
     var requestId: String
     var agent: HookAgent
     var event: HookEvent?
     var project: String?
+    var sessionId: String?
 
-    init(kind: AgentInboxMessage.Kind, requestId: String, agent: HookAgent, event: HookEvent?, project: String?) {
+    init(kind: AgentInboxMessage.Kind, requestId: String, agent: HookAgent, event: HookEvent?, project: String?, sessionId: String? = nil) {
         self.kind = kind
         self.requestId = requestId
         self.agent = agent
         self.event = event
-        self.project = project
+        self.project = project.map { String($0.prefix(100)) }
+        self.sessionId = sessionId.flatMap { Self.isValidSessionId($0) ? $0 : nil }
     }
 
     init(message: AgentInboxMessage) {
         self.init(
             kind: message.kind, requestId: message.requestId, agent: message.agent,
-            event: message.event, project: message.project.map { String($0.prefix(100)) }
+            event: message.event, project: message.project, sessionId: message.sessionId
         )
+    }
+
+    /// Letters, digits, dot, dash and underscore, 1 to 128 characters.
+    static func isValidSessionId(_ id: String) -> Bool {
+        (1...128).contains(id.utf8.count) && id.utf8.allSatisfy { byte in
+            (byte >= 0x30 && byte <= 0x39) || (byte >= 0x41 && byte <= 0x5A) || (byte >= 0x61 && byte <= 0x7A)
+                || byte == 0x2D || byte == 0x2E || byte == 0x5F
+        }
     }
 
     var url: URL? {
@@ -424,12 +438,14 @@ struct AgentDeepLink: Equatable, Sendable {
         ]
         if let event { items.append(URLQueryItem(name: "event", value: event.rawValue)) }
         if let project { items.append(URLQueryItem(name: "project", value: project)) }
+        if let sessionId { items.append(URLQueryItem(name: "session", value: sessionId)) }
         components.queryItems = items
         return components.url
     }
 
     /// Parses a link. Nil unless the request id is valid, the agent is
-    /// known and an update names its event. Other query items are ignored.
+    /// known and an update names its event. An invalid session id is
+    /// dropped; other query items are ignored.
     init?(url: URL) {
         let host = url.host()?.lowercased()
         let kind: AgentInboxMessage.Kind
@@ -445,8 +461,7 @@ struct AgentDeepLink: Equatable, Sendable {
         else { return nil }
         let event = value("event").flatMap(HookEvent.init(rawValue:))
         if kind == .update, event == nil { return nil }
-        let project = value("project").map { String($0.prefix(100)) }
-        self.init(kind: kind, requestId: requestId, agent: agent, event: event, project: project)
+        self.init(kind: kind, requestId: requestId, agent: agent, event: event, project: value("project"), sessionId: value("session"))
     }
 }
 
@@ -585,46 +600,28 @@ enum HookDecision {
         ])
     }
 
-    /// Claude permission update entry for the richer allow choices.
+    /// Claude permission update entry for the richer allow choices, or nil
+    /// for a plain allow. Only a suggestion Claude offered is ever echoed,
+    /// and only when `HookPermissionRules` finds it narrow enough; Parrot
+    /// never makes up a rule. Bypass is Parrot's own (a revocable marker),
+    /// so it never switches the CLI's mode.
     static func permissionUpdate(input: HookInput, response: AgentHookResponse) -> HookJSON? {
         let suggestions = input.permissionSuggestions ?? []
-        let toolRule: HookJSON = .object(["toolName": .string(input.toolName ?? "")])
-        func ruleSuggestion() -> [String: HookJSON]? {
-            if let index = response.suggestionIndex, suggestions.indices.contains(index),
-               let entry = suggestions[index].objectValue {
-                return entry
-            }
-            return suggestions.lazy.compactMap(\.objectValue).first {
-                $0["type"]?.stringValue == "addRules" && $0["behavior"]?.stringValue == "allow"
-            }
-        }
         switch response.action {
         case .allowAlways:
-            // Echoing a received suggestion is the documented path. Without
-            // one, save an allow rule for the whole tool in local settings.
-            if let entry = ruleSuggestion() { return .object(entry) }
-            guard input.toolName != nil else { return nil }
-            return .object([
-                "type": .string("addRules"), "rules": .array([toolRule]),
-                "behavior": .string("allow"), "destination": .string("localSettings"),
-            ])
+            let index = response.suggestionIndex ?? HookPermissionRules.alwaysAllowIndex(in: suggestions)
+            guard let index, suggestions.indices.contains(index),
+                  HookPermissionRules.isAlwaysAllowable(suggestions[index])
+            else { return nil }
+            return suggestions[index]
         case .allowSession:
-            if var entry = ruleSuggestion(), entry["type"]?.stringValue == "addRules" {
-                entry["destination"] = .string("session")
-                return .object(entry)
-            }
-            guard input.toolName != nil else { return nil }
-            return .object([
-                "type": .string("addRules"), "rules": .array([toolRule]),
-                "behavior": .string("allow"), "destination": .string("session"),
-            ])
-        case .bypass:
-            // A no-op unless the session was started with bypass available;
-            // Parrot's own bypass marker covers the rest of the session.
-            return .object([
-                "type": .string("setMode"), "mode": .string("bypassPermissions"),
-                "destination": .string("session"),
-            ])
+            let index = response.suggestionIndex ?? HookPermissionRules.sessionIndex(in: suggestions)
+            guard let index, suggestions.indices.contains(index),
+                  HookPermissionRules.isSessionAllowable(suggestions[index]),
+                  var entry = suggestions[index].objectValue
+            else { return nil }
+            entry["destination"] = .string("session")
+            return .object(entry)
         default:
             return nil
         }
@@ -641,6 +638,109 @@ enum HookDecision {
     }
 }
 
+// MARK: - Permission Rules
+
+/// Which of Claude's `permission_suggestions` Parrot may save, and how they
+/// read. Shared so the panel shows exactly what the helper will send, and
+/// the helper checks again.
+///
+/// "Always allow" saves only an `addRules` allow entry for local settings
+/// whose every rule is narrow: a named tool with specific content. For
+/// Bash that is an exact command, or a prefix with at least one argument
+/// before a trailing wildcard. Never a bare tool, `Bash(*)`, a tool-wide
+/// rule, a mode change or a directory entry.
+enum HookPermissionRules {
+
+    /// `Bash(npm run test:*)`; several rules joined with commas. Nil for
+    /// anything but an `addRules` entry.
+    static func text(of entry: HookJSON) -> String? {
+        guard entry["type"]?.stringValue == "addRules", let rules = entry["rules"]?.arrayValue, !rules.isEmpty else { return nil }
+        let parts = rules.compactMap { rule -> String? in
+            guard let tool = rule["toolName"]?.stringValue, !tool.isEmpty else { return nil }
+            guard let content = rule["ruleContent"]?.stringValue, !content.isEmpty else { return tool }
+            return "\(tool)(\(content))"
+        }
+        return parts.count == rules.count ? parts.joined(separator: ", ") : nil
+    }
+
+    /// True when one rule is narrower than the whole tool.
+    static func isSpecificRule(toolName: String, content: String?) -> Bool {
+        guard !toolName.isEmpty, !toolName.contains("*") else { return false }
+        let content = (content ?? "").trimmingCharacters(in: .whitespaces)
+        guard !content.isEmpty, !content.allSatisfy({ "*/.: ".contains($0) }) else { return false }
+        guard toolName == "Bash" || toolName == "PowerShell" else { return true }
+        var prefix = content
+        var wildcard = false
+        for suffix in [":*", " *", "*"] where prefix.hasSuffix(suffix) {
+            prefix.removeLast(suffix.count)
+            wildcard = true
+            break
+        }
+        guard !prefix.contains("*") else { return false }
+        let words = prefix.split(whereSeparator: \.isWhitespace)
+        return wildcard ? words.count >= 2 : !words.isEmpty
+    }
+
+    private static func isAllowRules(_ entry: HookJSON) -> Bool {
+        entry["type"]?.stringValue == "addRules" && entry["behavior"]?.stringValue == "allow"
+            && !(entry["rules"]?.arrayValue ?? []).isEmpty
+    }
+
+    private static func rulesAreSpecific(_ entry: HookJSON) -> Bool {
+        (entry["rules"]?.arrayValue ?? []).allSatisfy { rule in
+            isSpecificRule(toolName: rule["toolName"]?.stringValue ?? "", content: rule["ruleContent"]?.stringValue)
+        }
+    }
+
+    /// May be saved by "always allow": narrow rules, local settings only.
+    static func isAlwaysAllowable(_ entry: HookJSON) -> Bool {
+        isAllowRules(entry) && entry["destination"]?.stringValue == "localSettings" && rulesAreSpecific(entry)
+    }
+
+    /// May be granted for the session: narrow rules, any destination (it is
+    /// rewritten to `session`).
+    static func isSessionAllowable(_ entry: HookJSON) -> Bool {
+        isAllowRules(entry) && rulesAreSpecific(entry)
+    }
+
+    static func alwaysAllowIndex(in suggestions: [HookJSON]) -> Int? {
+        suggestions.firstIndex(where: isAlwaysAllowable)
+    }
+
+    static func sessionIndex(in suggestions: [HookJSON]) -> Int? {
+        suggestions.firstIndex(where: isSessionAllowable)
+    }
+}
+
+// MARK: - Processes
+
+enum AgentHookProcess {
+    private static let shells: Set<String> = ["sh", "bash", "zsh", "dash", "fish", "env", "-sh", "-bash", "-zsh"]
+
+    /// Parent process id and short name, or nil.
+    static func parentAndName(of pid: Int32) -> (parent: Int32, name: String)? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.stride)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        let name = withUnsafeBytes(of: info.pbi_comm) { raw in
+            String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+        }
+        return (Int32(bitPattern: info.pbi_ppid), name)
+    }
+
+    /// The CLI that ran this hook: the parent, skipping the shell a command
+    /// hook runs in. Nil when it cannot be found.
+    static func cliPid(of pid: Int32 = getpid()) -> Int32? {
+        guard var candidate = parentAndName(of: pid)?.parent else { return nil }
+        for _ in 0..<3 {
+            guard candidate > 1, let info = parentAndName(of: candidate) else { return nil }
+            guard shells.contains(info.name) else { return candidate }
+            candidate = info.parent
+        }
+        return nil
+    }
+}
+
 // MARK: - Paths and Markers
 
 /// Shared state the app writes for the helper: is the feature on, which
@@ -650,6 +750,8 @@ struct AgentHookState: Codable, Equatable, Sendable {
     var appPid: Int32
     /// Seconds the helper waits for an answer.
     var responseTimeout: Double
+    /// CLIs whose Stop event Parrot answers. Missing: none.
+    var stopAgents: [HookAgent]?
 }
 
 /// Where the helper and the app meet.
@@ -723,9 +825,19 @@ struct AgentHookPaths: Equatable, Sendable {
         controlDir.appendingPathComponent("disabled-" + Self.safeName(sessionId))
     }
 
-    /// Present: the helper allows this session's permission requests itself.
+    /// Present: the helper allows this session's permission requests itself,
+    /// but only for the CLI process whose id the marker holds. Bypass ends
+    /// with that process, even if Parrot is not running to clean up.
     func bypassMarker(sessionId: String) -> URL {
         controlDir.appendingPathComponent("bypass-" + Self.safeName(sessionId))
+    }
+
+    /// The CLI process id a session's bypass marker is bound to, or nil
+    /// when there is no private marker holding one.
+    func bypassOwner(sessionId: String) -> Int32? {
+        let marker = bypassMarker(sessionId: sessionId)
+        guard Self.isPrivateFile(marker), let text = try? String(contentsOf: marker, encoding: .utf8) else { return nil }
+        return Int32(text.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     /// Letters, digits, dot, dash and underscore; anything else becomes `_`.

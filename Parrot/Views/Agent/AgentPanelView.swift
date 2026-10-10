@@ -32,6 +32,9 @@ struct AgentPanelView: View {
                     planArea(session)
                 }
                 footer(session)
+            } else if !bridge.activeBypasses.isEmpty {
+                // No request waiting, but a bypass is on: keep its badge in view.
+                AgentBypassBadges(bridge: bridge)
             } else {
                 Text("No agent is waiting.")
                     .foregroundStyle(.secondary)
@@ -103,29 +106,44 @@ struct AgentPanelView: View {
                     Button("Disable") { Task { await bridge.disableCurrentSession() } }
                 }
             }
-        } else if !session.trusted {
-            Label("Came by link, so details are hidden and choices are limited.", systemImage: "link")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         } else {
-            HStack(spacing: 10) {
-                if bridge.isBypassed(session.sessionId) {
-                    Button {
-                        bridge.setBypass(false, sessionId: session.sessionId)
-                    } label: {
-                        Label("Bypass permissions active, click to revoke", systemImage: "bolt.shield")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.orange)
-                    .help("Revoking stops Parrot approving for this session. If the CLI itself switched to bypass mode, change it in the terminal.")
-                }
-                Spacer()
-                Button("Disable Parrot for This Session") { confirmingDisable = true }
-                    .buttonStyle(.plain)
+            AgentBypassBadges(bridge: bridge)
+            if !session.trusted {
+                Label("Came by link, so details are hidden and choices are limited.", systemImage: "link")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            } else {
+                HStack {
+                    Spacer()
+                    Button("Disable Parrot for This Session") { confirmingDisable = true }
+                        .buttonStyle(.plain)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
+        }
+    }
+}
+
+// MARK: - Bypass Badges
+
+/// One badge per active bypass, shown whenever the panel is up (the panel
+/// stays up while any bypass is on). Clicking revokes it.
+struct AgentBypassBadges: View {
+    @Bindable var bridge: AgentBridge
+
+    var body: some View {
+        ForEach(bridge.activeBypasses, id: \.sessionId) { entry in
+            Button {
+                bridge.setBypass(false, sessionId: entry.sessionId)
+            } label: {
+                Label("Bypass permissions active for \(entry.bypass.label), click to revoke", systemImage: "bolt.shield")
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.orange)
+            .help("Parrot approves every tool call from this session until you revoke it or the CLI exits. If the CLI itself runs in bypass mode, change that in the terminal.")
         }
     }
 }
@@ -249,9 +267,15 @@ struct AgentDraftEditor: View {
 
 // MARK: - Permission
 
+/// A tool permission request. Speech only fills the editor; Allow and Deny
+/// are always a click (or Cmd+Return for Allow on a trusted request).
+/// Grants wider than once show exactly what they save, and are offered only
+/// for inbox requests: Always Allow and Allow for This Session when Claude
+/// suggested a narrow rule, Bypass when Parrot can watch the CLI process.
 struct AgentPermissionView: View {
     @Bindable var bridge: AgentBridge
     let session: AgentSession
+    @State private var confirmingBypass = false
 
     var body: some View {
         let permission = session.permission
@@ -272,31 +296,83 @@ struct AgentPermissionView: View {
             }
             AgentDraftEditor(
                 text: $bridge.draft,
-                placeholder: session.trusted ? "Say allow or deny, or explain a denial" : "Explain a denial (optional)"
+                placeholder: session.trusted ? "Dictate or type a reason to deny (optional)" : "Explain a denial (optional)"
             )
-            HStack {
-                // A link request never offers saved rules or bypass.
-                if session.trusted {
-                    Menu("More") {
-                        if permission?.canUpdatePermissions ?? false {
-                            // No index: the helper saves the first allow rule
-                            // it was offered, never a mode change.
-                            Button("Always Allow") { Task { await bridge.respond(.allowAlways) } }
-                            Button("Allow for This Session") { Task { await bridge.respond(.allowSession) } }
-                        }
-                        Button("Bypass Permissions for This Session") { Task { await bridge.respond(.bypass) } }
+            if bridge.draftSaysAllow {
+                Text("Click Allow to approve. Speaking never approves on its own.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if confirmingBypass {
+                bypassConfirmation
+            } else {
+                grantRows
+                HStack {
+                    if bridge.canBypass(session) {
+                        Button("Bypass for This Session…") { confirmingBypass = true }
                     }
-                    .fixedSize()
+                    Spacer()
+                    Button("Deny") {
+                        Task { await bridge.respond(.deny, text: AgentBridge.denialMessage(bridge.draft), explicit: true) }
+                    }
+                    // A link request is allowed by a click only, no shortcut.
+                    Button("Allow") { Task { await bridge.respond(.allow, explicit: true) } }
+                        .keyboardShortcut(session.trusted ? KeyboardShortcut(.return, modifiers: .command) : nil)
+                        .buttonStyle(.borderedProminent)
                 }
-                Spacer()
-                Button("Deny") {
-                    Task { await bridge.respond(.deny, text: bridge.draft) }
-                }
-                // A link request is allowed by a click only, no shortcut.
-                Button("Allow") { Task { await bridge.respond(.allow, explicit: true) } }
-                    .keyboardShortcut(session.trusted ? KeyboardShortcut(.return, modifiers: .command) : nil)
-                    .buttonStyle(.borderedProminent)
             }
         }
+        .onChange(of: session.requestId) { confirmingBypass = false }
+    }
+
+    /// Always Allow and Allow for This Session, each next to the exact rule
+    /// it saves. Hidden when Claude offered nothing narrow enough.
+    @ViewBuilder
+    private var grantRows: some View {
+        if let always = bridge.alwaysAllowRule(for: session) {
+            grantRow(title: "Always Allow", rule: always.text, note: "Saved in this project's local Claude settings") {
+                Task { await bridge.respond(.allowAlways, suggestionIndex: always.index, explicit: true) }
+            }
+        }
+        if let rule = bridge.sessionRule(for: session) {
+            grantRow(title: "Allow for This Session", rule: rule.text, note: "Until this Claude session ends") {
+                Task { await bridge.respond(.allowSession, suggestionIndex: rule.index, explicit: true) }
+            }
+        }
+    }
+
+    private func grantRow(title: String, rule: String, note: String, action: @escaping () -> Void) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Button(title, action: action)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(rule)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                Text(note).font(.caption2).foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+    }
+
+    private var bypassConfirmation: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Bypass permissions for this session?", systemImage: "exclamationmark.shield")
+                .font(.subheadline.weight(.semibold))
+            Text("Parrot will approve every tool call from this \(session.agentName) session without asking, including shell commands and file writes, until you revoke it. It ends when the session ends or the CLI process exits. The badge stays at the bottom of this panel while it is on.")
+                .font(.caption)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("Cancel") { confirmingBypass = false }
+                Button("Bypass Permissions", role: .destructive) {
+                    confirmingBypass = false
+                    Task { await bridge.respond(.bypass, explicit: true) }
+                }
+            }
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
     }
 }
