@@ -36,10 +36,12 @@ final class LevelMeterParticipant: RecordingParticipant {
         live.silentMicDevice = nil
 
         let meter = LevelMeter { [weak session, weak live] events in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let session, let live, session.levelMeter != nil else { return }
-                    Self.apply(events, to: live, deviceName: session.deviceName)
+            for (delay, batch) in Self.spread(events) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    MainActor.assumeIsolated {
+                        guard let session, let live, session.levelMeter != nil else { return }
+                        Self.apply(batch, to: live, deviceName: session.deviceName)
+                    }
                 }
             }
         }
@@ -69,6 +71,22 @@ final class LevelMeterParticipant: RecordingParticipant {
     func didCancel(_ session: DictationSession) {
         stopMeter(session)
         services.live.silentMicDevice = nil
+    }
+
+    /// A 100 ms buffer yields two levels; they are published 50 ms apart so
+    /// the bars move at 20 Hz. Other events go out at once.
+    nonisolated static func spread(_ events: [LevelMeter.Event]) -> [(TimeInterval, [LevelMeter.Event])] {
+        var batches: [(TimeInterval, [LevelMeter.Event])] = []
+        for event in events {
+            if case .levels(let levels) = event, levels.count > 1 {
+                for (index, level) in levels.enumerated() {
+                    batches.append((Double(index) * 0.05, [.levels([level])]))
+                }
+            } else {
+                batches.append((0, [event]))
+            }
+        }
+        return batches
     }
 
     /// Applies meter events to the live state.

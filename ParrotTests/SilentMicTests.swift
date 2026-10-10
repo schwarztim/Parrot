@@ -98,10 +98,17 @@ final class SilentMicTests: XCTestCase {
 
     // MARK: - Participant
 
+    /// Waits past the 50 ms level spacing so every queued update has landed.
     private func drainMainQueue() async {
         let drained = expectation(description: "main queue drained")
-        DispatchQueue.main.async { drained.fulfill() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { drained.fulfill() }
         await fulfillment(of: [drained], timeout: 5)
+    }
+
+    func testBufferLevelsAreSpreadFiftyMillisecondsApart() {
+        let batches = LevelMeterParticipant.spread([.levels([0.1, 0.2]), .silentMic(true)])
+        XCTAssertEqual(batches.map(\.0), [0, 0.05, 0])
+        XCTAssertEqual(batches.map(\.1), [[.levels([0.1])], [.levels([0.2])], [.silentMic(true)]])
     }
 
     func testParticipantPublishesWarningLevelsAndClears() async throws {

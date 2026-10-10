@@ -27,6 +27,7 @@ final class SystemAudioCapture: NSObject, AudioMixSource, SCStreamOutput, SCStre
     private var pending: [Float] = []
     private(set) var droppedSamples = 0
     private var stream: SCStream?
+    private var isStopped = false
     private let sampleQueue = DispatchQueue(label: "com.parrot.system-audio", qos: .userInitiated)
 
     func start() async throws {
@@ -56,12 +57,22 @@ final class SystemAudioCapture: NSObject, AudioMixSource, SCStreamOutput, SCStre
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: sampleQueue)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
         try await stream.startCapture()
-        lock.withLock { self.stream = stream }
+        // The recording may have ended while the stream was starting.
+        let stoppedMeanwhile: Bool = lock.withLock {
+            if isStopped { return true }
+            self.stream = stream
+            return false
+        }
+        if stoppedMeanwhile {
+            try? await stream.stopCapture()
+            return
+        }
         diagLog("[Parrot:Audio] System audio capture started")
     }
 
     func stop() async {
         let stream: SCStream? = lock.withLock {
+            isStopped = true
             let current = self.stream
             self.stream = nil
             pending.removeAll()
