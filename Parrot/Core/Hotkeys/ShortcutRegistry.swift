@@ -251,6 +251,28 @@ enum ShortcutRegistry {
         return plan
     }
 
+    /// What a recorder shows after "Already in use by": the shortcut's title
+    /// or "the <name> mode". Nil when `candidate` is free.
+    static func conflictName(
+        for candidate: Shortcut,
+        assigningTo target: ShortcutTarget,
+        hotkeys: HotkeySettings,
+        modes: [Mode]
+    ) -> String? {
+        let modeShortcuts = modes.compactMap { mode in
+            mode.shortcut.map { (id: mode.id, shortcut: Shortcut(mode: $0)) }
+        }
+        let current = targets(shortcuts: hotkeys.allShortcuts, modes: modeShortcuts)
+        switch conflict(for: candidate, assigningTo: target, in: current) {
+        case .name(let name)?:
+            return name.title
+        case .mode(let id)?:
+            return "the \(modes.first { $0.id == id }?.name ?? "other") mode"
+        case nil:
+            return nil
+        }
+    }
+
     private static func order(_ target: ShortcutTarget) -> Int {
         switch target {
         case .name(let name): return ShortcutName.allCases.firstIndex(of: name) ?? 0

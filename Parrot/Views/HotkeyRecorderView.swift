@@ -2,146 +2,250 @@ import SwiftUI
 import Carbon
 import CoreGraphics
 
+/// One shortcut row: label and description, key caps, reset to default and
+/// remove. [TRG]
+///
+/// Clicking the key caps (or "Record shortcut...") captures the next key
+/// combination, lone modifier (left and right apart, Fn, Caps Lock) or
+/// mouse button 2 and up. Escape cancels capture. A capture that `conflict`
+/// reports as taken is refused with "Already in use". Global shortcuts pause
+/// while capturing so a key that is bound today can be recorded again.
 struct HotkeyRecorderView: View {
     let label: String
-    @Binding var binding: HotkeyBinding?
+    let summary: String?
+    @Binding var shortcut: Shortcut?
+    let defaultShortcut: Shortcut?
+    let allowsKeys: Bool
+    let allowsMouse: Bool
+    /// Returns the name of whatever already uses the candidate, or nil.
+    let conflict: (Shortcut) -> String?
 
     @State private var isCapturing = false
+    @State private var heldModifiers = ""
+    @State private var refusal: String?
+
+    init(
+        label: String,
+        summary: String? = nil,
+        shortcut: Binding<Shortcut?>,
+        defaultShortcut: Shortcut? = nil,
+        allowsKeys: Bool = true,
+        allowsMouse: Bool = true,
+        conflict: @escaping (Shortcut) -> String? = { _ in nil }
+    ) {
+        self.label = label
+        self.summary = summary
+        self._shortcut = shortcut
+        self.defaultShortcut = defaultShortcut
+        self.allowsKeys = allowsKeys
+        self.allowsMouse = allowsMouse
+        self.conflict = conflict
+    }
+
+    private var current: Shortcut? {
+        guard let shortcut, !shortcut.isEmpty else { return nil }
+        return shortcut
+    }
+
+    private var canReset: Bool {
+        guard let defaultShortcut, !defaultShortcut.isEmpty else { return false }
+        return current != defaultShortcut
+    }
 
     var body: some View {
-        HStack {
-            Text(label)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            HStack(spacing: 8) {
-                // Current Binding Display
-                hotkeyDisplay
-
-                // Record / Clear Buttons
-                if isCapturing {
-                    Button("Cancel") {
-                        stopCapturing()
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .font(.caption)
-                } else {
-                    Button("Record") {
-                        startCapturing()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-
-                    if binding != nil {
-                        Button("Clear") {
-                            binding = nil
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                if let refusal {
+                    Text(refusal)
                         .font(.caption)
+                        .foregroundStyle(.red)
+                } else if let summary {
+                    Text(summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            recorderField
+
+            if !isCapturing {
+                if canReset {
+                    Button {
+                        if let defaultShortcut { accept(defaultShortcut) }
+                    } label: {
+                        Image(systemName: "arrow.counterclockwise")
                     }
+                    .buttonStyle(.borderless)
+                    .help("Reset to default")
+                }
+                if current != nil {
+                    Button {
+                        refusal = nil
+                        shortcut = Shortcut.none
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Remove")
+                }
+            }
+        }
+        .onDisappear { stopCapturing() }
+    }
+
+    // MARK: - Recorder Field
+
+    @ViewBuilder
+    private var recorderField: some View {
+        if isCapturing {
+            ZStack {
+                Text(heldModifiers.isEmpty ? capturePrompt : heldModifiers)
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .strokeBorder(Color.orange.opacity(0.5), lineWidth: 1)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color.orange.opacity(0.08))
+                            )
+                    )
+
+                // Invisible NSView that captures key/mouse events with proper keyCodes
+                KeyCaptureOverlay(
+                    allowsKeys: allowsKeys,
+                    allowsMouse: allowsMouse,
+                    onCapture: { accept($0) },
+                    onModifiersChanged: { heldModifiers = $0 },
+                    onCancel: { stopCapturing() }
+                )
+                .frame(width: 0, height: 0)
+            }
+
+            Button("Cancel") {
+                stopCapturing()
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .font(.caption)
+        } else {
+            Button {
+                startCapturing()
+            } label: {
+                if let current {
+                    ShortcutKeycaps(shortcut: current)
+                } else {
+                    Text("Record shortcut...")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Color(.controlBackgroundColor))
+                        )
+                }
+            }
+            .buttonStyle(.plain)
+            .help("Click to record a new shortcut")
+            .contextMenu {
+                if let current, current.isModifierOnly {
+                    Toggle("Double-tap to trigger", isOn: Binding(
+                        get: { current.doubleTap },
+                        set: { isOn in
+                            var updated = current
+                            updated.doubleTap = isOn
+                            shortcut = updated
+                        }
+                    ))
                 }
             }
         }
     }
 
-    // MARK: - Hotkey Display
-
-    private var hotkeyDisplay: some View {
-        Group {
-            if isCapturing {
-                ZStack {
-                    Text("Press shortcut...")
-                        .font(.callout)
-                        .foregroundStyle(.orange)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .strokeBorder(Color.orange.opacity(0.5), lineWidth: 1)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .fill(Color.orange.opacity(0.08))
-                                )
-                        )
-
-                    // Invisible NSView that captures key/mouse events with proper keyCodes
-                    KeyCaptureOverlay(
-                        onCapture: { keyCode, modifiers, displayName in
-                            binding = HotkeyBinding(
-                                keyCode: keyCode,
-                                modifiers: modifiers,
-                                displayName: displayName
-                            )
-                            stopCapturing()
-                        },
-                        onMouseCapture: { buttonNumber, displayName in
-                            binding = HotkeyBinding(
-                                keyCode: 0,
-                                modifiers: [],
-                                displayName: displayName,
-                                mouseButton: buttonNumber
-                            )
-                            stopCapturing()
-                        },
-                        onCancel: {
-                            stopCapturing()
-                        }
-                    )
-                    .frame(width: 0, height: 0)
-                }
-            } else if let currentBinding = binding {
-                Text(currentBinding.displayName)
-                    .font(.system(.callout, design: .rounded, weight: .medium))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color(.controlBackgroundColor))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .strokeBorder(Color(.separatorColor), lineWidth: 0.5)
-                    )
-            } else {
-                Text("None")
-                    .font(.callout)
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color(.controlBackgroundColor))
-                    )
-            }
-        }
+    private var capturePrompt: String {
+        allowsKeys ? "Press any key to set your shortcut..." : "Click a mouse button..."
     }
 
     // MARK: - Capture
 
     private func startCapturing() {
+        refusal = nil
+        heldModifiers = ""
         isCapturing = true
+        NotificationCenter.default.post(name: .parrotShortcutCaptureDidBegin, object: nil)
     }
 
     private func stopCapturing() {
+        guard isCapturing else { return }
         isCapturing = false
+        heldModifiers = ""
+        NotificationCenter.default.post(name: .parrotShortcutCaptureDidEnd, object: nil)
+    }
+
+    private func accept(_ candidate: Shortcut) {
+        stopCapturing()
+        if let other = conflict(candidate) {
+            refusal = "Already in use by \(other)"
+            return
+        }
+        refusal = nil
+        shortcut = candidate
+    }
+}
+
+// MARK: - Key Caps
+
+/// A shortcut drawn as key caps, for example ⌥ Space or Right ⌘. [TRG]
+struct ShortcutKeycaps: View {
+    let shortcut: Shortcut
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(Array(shortcut.keycaps.enumerated()), id: \.offset) { _, cap in
+                Text(cap)
+                    .font(.system(.callout, design: .rounded, weight: .medium))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(Color(.controlBackgroundColor))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .strokeBorder(Color(.separatorColor), lineWidth: 0.5)
+                    )
+            }
+            if shortcut.doubleTap {
+                Text("×2")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(shortcut.displayName)
     }
 }
 
 // MARK: - Key Capture NSViewRepresentable
 
 /// Invisible NSView that becomes first responder to capture key events with
-/// proper Carbon keyCodes — something SwiftUI's `.onKeyPress()` cannot provide.
+/// proper Carbon keyCodes, which SwiftUI's `.onKeyPress()` cannot provide.
 private struct KeyCaptureOverlay: NSViewRepresentable {
-    let onCapture: (UInt16, NSEvent.ModifierFlags, String) -> Void
-    let onMouseCapture: (Int, String) -> Void
+    let allowsKeys: Bool
+    let allowsMouse: Bool
+    let onCapture: (Shortcut) -> Void
+    let onModifiersChanged: (String) -> Void
     let onCancel: () -> Void
 
     func makeNSView(context: Context) -> KeyCaptureNSView {
         let view = KeyCaptureNSView()
-        view.onCapture = onCapture
-        view.onMouseCapture = onMouseCapture
-        view.onCancel = onCancel
+        configure(view)
         // Defer first-responder request so the view is in the window hierarchy.
         DispatchQueue.main.async {
             view.window?.makeFirstResponder(view)
@@ -150,9 +254,15 @@ private struct KeyCaptureOverlay: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: KeyCaptureNSView, context: Context) {
-        nsView.onCapture = onCapture
-        nsView.onMouseCapture = onMouseCapture
-        nsView.onCancel = onCancel
+        configure(nsView)
+    }
+
+    private func configure(_ view: KeyCaptureNSView) {
+        view.allowsKeys = allowsKeys
+        view.allowsMouse = allowsMouse
+        view.onShortcut = onCapture
+        view.onModifiersChanged = onModifiersChanged
+        view.onCancel = onCancel
     }
 }
 
@@ -163,9 +273,17 @@ private struct KeyCaptureOverlay: NSViewRepresentable {
 /// the view has a zero frame (overlaid invisibly) and macOS hit-testing
 /// would never deliver mouse events to it.
 final class KeyCaptureNSView: NSView {
+    var allowsKeys = true
+    var allowsMouse = true
+    /// The captured shortcut.
+    var onShortcut: ((Shortcut) -> Void)?
+    /// The modifiers held right now, as symbols, for live feedback.
+    var onModifiersChanged: ((String) -> Void)?
+    var onCancel: (() -> Void)?
+
+    /// Older callbacks, still fired alongside `onShortcut`.
     var onCapture: ((UInt16, NSEvent.ModifierFlags, String) -> Void)?
     var onMouseCapture: ((Int, String) -> Void)?
-    var onCancel: (() -> Void)?
 
     /// Tracks whether a regular key was pressed while a modifier was held,
     /// so we can distinguish modifier-only bindings (e.g., Right Option alone).
@@ -174,6 +292,8 @@ final class KeyCaptureNSView: NSView {
 
     /// Local event monitor for mouse buttons (hit-test independent).
     private var mouseMonitor: Any?
+
+    private static let heldFlags: NSEvent.ModifierFlags = [.control, .option, .shift, .command, .function]
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -195,16 +315,11 @@ final class KeyCaptureNSView: NSView {
     private func installMouseMonitor() {
         guard mouseMonitor == nil else { return }
         mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseDown) { [weak self] event in
-            guard let self else { return event }
+            guard let self, self.allowsMouse else { return event }
             let button = event.buttonNumber
-            let displayName: String
-            switch button {
-            case 2: displayName = "Middle Mouse"
-            case 3: displayName = "Mouse Button 4"
-            case 4: displayName = "Mouse Button 5"
-            default: displayName = "Mouse Button \(button)"
-            }
-            self.onMouseCapture?(button, displayName)
+            let shortcut = Shortcut.mouse(button)
+            self.onMouseCapture?(button, shortcut.displayName)
+            self.onShortcut?(shortcut)
             return nil // consume the event
         }
     }
@@ -227,6 +342,7 @@ final class KeyCaptureNSView: NSView {
             onCancel?()
             return
         }
+        guard allowsKeys else { return }
 
         // Build clean modifier flags (strip device-specific bits)
         var modifiers: NSEvent.ModifierFlags = []
@@ -235,36 +351,48 @@ final class KeyCaptureNSView: NSView {
         if event.modifierFlags.contains(.shift) { modifiers.insert(.shift) }
         if event.modifierFlags.contains(.command) { modifiers.insert(.command) }
 
-        let displayName = Self.buildDisplayName(
-            keyCode: event.keyCode,
-            modifiers: modifiers,
-            characters: event.charactersIgnoringModifiers
-        )
-        onCapture?(event.keyCode, modifiers, displayName)
+        let shortcut = Shortcut(keyCode: Int(event.keyCode), modifiers: modifiers)
+        onCapture?(event.keyCode, modifiers, shortcut.displayName)
+        onShortcut?(shortcut)
     }
 
     override func flagsChanged(with event: NSEvent) {
-        let modifierKeyCodes: Set<UInt16> = [
-            0x3A, 0x3D, // Left/Right Option
-            0x37, 0x36, // Left/Right Command
-            0x38, 0x3C, // Left/Right Shift
-            0x3B, 0x3E, // Left/Right Control
-        ]
+        guard allowsKeys, Shortcut.loneModifierKeyCodes.contains(Int(event.keyCode)) else { return }
 
-        guard modifierKeyCodes.contains(event.keyCode) else { return }
+        // Caps Lock reports only its state flipping, so take it at once.
+        if Int(event.keyCode) == Shortcut.capsLockKeyCode {
+            captureLoneModifier(event.keyCode)
+            return
+        }
 
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let flags = event.modifierFlags.intersection(Self.heldFlags)
+        onModifiersChanged?(Self.symbols(for: flags))
 
-        if flags.rawValue != 0 {
-            // Modifier pressed down — track it
+        if !flags.isEmpty {
+            // Modifier pressed down: track it
             lastModifierKeyCode = event.keyCode
             keyDownOccurred = false
         } else if let modKey = lastModifierKeyCode, !keyDownOccurred {
-            // All modifiers released without a regular key press — modifier-only binding
-            let displayName = Self.describeModifierKey(modKey)
-            onCapture?(modKey, [], displayName)
-            lastModifierKeyCode = nil
+            // All modifiers released without a regular key press: modifier-only binding
+            captureLoneModifier(modKey)
         }
+    }
+
+    private func captureLoneModifier(_ keyCode: UInt16) {
+        let shortcut = Shortcut.key(Int(keyCode))
+        lastModifierKeyCode = nil
+        onCapture?(keyCode, [], shortcut.displayName)
+        onShortcut?(shortcut)
+    }
+
+    private static func symbols(for flags: NSEvent.ModifierFlags) -> String {
+        var parts = ""
+        if flags.contains(.function) { parts += "fn " }
+        if flags.contains(.control) { parts += "⌃" }
+        if flags.contains(.option) { parts += "⌥" }
+        if flags.contains(.shift) { parts += "⇧" }
+        if flags.contains(.command) { parts += "⌘" }
+        return parts
     }
 
     // MARK: - Display Name Helpers
@@ -274,77 +402,36 @@ final class KeyCaptureNSView: NSView {
         modifiers: NSEvent.ModifierFlags,
         characters: String?
     ) -> String {
-        var parts: [String] = []
-        if modifiers.contains(.control) { parts.append("⌃") }
-        if modifiers.contains(.option) { parts.append("⌥") }
-        if modifiers.contains(.shift) { parts.append("⇧") }
-        if modifiers.contains(.command) { parts.append("⌘") }
-
-        let keyName: String
-        switch keyCode {
-        case 49:  keyName = "Space"
-        case 36:  keyName = "Return"
-        case 48:  keyName = "Tab"
-        case 51:  keyName = "Delete"
-        case 117: keyName = "Forward Delete"
-        case 123: keyName = "←"
-        case 124: keyName = "→"
-        case 125: keyName = "↓"
-        case 126: keyName = "↑"
-        case 115: keyName = "Home"
-        case 119: keyName = "End"
-        case 116: keyName = "Page Up"
-        case 121: keyName = "Page Down"
-        case 122: keyName = "F1"
-        case 120: keyName = "F2"
-        case 99:  keyName = "F3"
-        case 118: keyName = "F4"
-        case 96:  keyName = "F5"
-        case 97:  keyName = "F6"
-        case 98:  keyName = "F7"
-        case 100: keyName = "F8"
-        case 101: keyName = "F9"
-        case 109: keyName = "F10"
-        case 103: keyName = "F11"
-        case 111: keyName = "F12"
-        default:
-            keyName = characters?.uppercased() ?? "?"
-        }
-
-        parts.append(keyName)
-        return parts.joined()
+        Shortcut(keyCode: Int(keyCode), modifiers: modifiers).displayName
     }
 
     static func describeModifierKey(_ keyCode: UInt16) -> String {
-        switch keyCode {
-        case 0x3A: return "Left Option"
-        case 0x3D: return "Right Option"
-        case 0x37: return "Left Command"
-        case 0x36: return "Right Command"
-        case 0x38: return "Left Shift"
-        case 0x3C: return "Right Shift"
-        case 0x3B: return "Left Control"
-        case 0x3E: return "Right Control"
-        default:   return "Modifier"
-        }
+        Shortcut.loneModifierName(Int(keyCode))
     }
 }
 
-// MARK: - Non-Optional Convenience Overload
+// MARK: - HotkeyBinding Convenience
 
 extension HotkeyRecorderView {
+    /// A recorder over an optional `HotkeyBinding`.
+    init(label: String, binding: Binding<HotkeyBinding?>) {
+        self.init(label: label, shortcut: Binding(
+            get: { binding.wrappedValue.flatMap { Shortcut(legacy: $0) } },
+            set: { binding.wrappedValue = $0?.legacyBinding }
+        ))
+    }
+
     /// Convenience initializer for non-optional bindings (e.g., the toggle
-    /// recording hotkey which always has a value).
+    /// recording hotkey which always has a value). Remove is ignored.
     init(label: String, requiredBinding: Binding<HotkeyBinding>) {
-        self.label = label
-        self._binding = Binding(
-            get: { requiredBinding.wrappedValue },
+        self.init(label: label, shortcut: Binding(
+            get: { Shortcut(legacy: requiredBinding.wrappedValue) },
             set: { newValue in
-                if let newValue {
-                    requiredBinding.wrappedValue = newValue
+                if let binding = newValue?.legacyBinding {
+                    requiredBinding.wrappedValue = binding
                 }
             }
-        )
+        ))
     }
 }
 
@@ -352,7 +439,15 @@ extension HotkeyRecorderView {
     Form {
         HotkeyRecorderView(
             label: "Toggle Recording",
-            requiredBinding: .constant(.defaultHotkey)
+            summary: "Starts and stops recordings",
+            shortcut: .constant(.key(0x31, .option)),
+            defaultShortcut: .key(0x31, .option)
+        )
+        HotkeyRecorderView(
+            label: "Push to Talk",
+            summary: "Hold to record, release when done",
+            shortcut: .constant(.key(0x36)),
+            defaultShortcut: .key(0x3D)
         )
         HotkeyRecorderView(
             label: "Cancel Recording",
@@ -360,5 +455,5 @@ extension HotkeyRecorderView {
         )
     }
     .formStyle(.grouped)
-    .frame(width: 450, height: 200)
+    .frame(width: 520, height: 260)
 }
