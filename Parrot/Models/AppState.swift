@@ -577,6 +577,11 @@ final class AppState {
             self?.permissionsManager?.openSystemPreferences(for: .inputMonitoring)
         }
 
+        // Apply the saved binding before listening, so a custom hotkey works
+        // as soon as setup finishes (including the onboarding Try it step)
+        // instead of after the main window's delayed sync.
+        if let settings { syncHotkeys(from: settings) }
+
         diagLog("[Parrot:Setup] Starting HotkeyManager")
         hotkey.start()
 

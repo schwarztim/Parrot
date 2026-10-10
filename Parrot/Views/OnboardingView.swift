@@ -703,6 +703,14 @@ struct OnboardingView: View {
             hotkeyProbe?.stop()
             hotkeyProbe = nil
         }
+
+        // Try it dictates for real, so it needs the hotkey listener and the
+        // rest of the pipeline that setup creates. The model download starts
+        // at Welcome, so the Model step's Download button (the only other
+        // caller during onboarding) usually never appears. Idempotent.
+        if step == .tryIt {
+            appState.setup()
+        }
     }
 
     private func startHotkeyProbe() {
