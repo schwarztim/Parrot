@@ -203,6 +203,9 @@ struct ModeEditSheet: View {
     @State private var description: String = ""
     @State private var refinementPrompt: String = ""
     @State private var appBundleIDs: [String] = []
+    /// The mode being edited, so fields this sheet does not show (and the
+    /// embedded sections' edits) survive a save.
+    @State private var draft = Mode(name: "")
 
     var body: some View {
         VStack(spacing: 0) {
@@ -267,6 +270,12 @@ struct ModeEditSheet: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                // Sections owned by other areas, in this fixed order.
+                VoiceModeSection(mode: $draft)
+                AudioModeSection(mode: $draft)
+                OutputModeSection(mode: $draft)
+                ShortcutModeSection(mode: $draft)
             }
             .formStyle(.grouped)
 
@@ -282,14 +291,12 @@ struct ModeEditSheet: View {
 
                 Button(mode == nil ? "Add" : "Save") {
                     let trimmedPrompt = refinementPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let savedMode = Mode(
-                        id: mode?.id ?? UUID(),
-                        name: name,
-                        description: description,
-                        isDefault: mode?.isDefault ?? false,
-                        refinementPrompt: trimmedPrompt.isEmpty ? nil : trimmedPrompt,
-                        appBundleIDs: appBundleIDs.isEmpty ? nil : appBundleIDs
-                    )
+                    var savedMode = draft
+                    savedMode.name = name
+                    savedMode.description = description
+                    savedMode.isDefault = mode?.isDefault ?? false
+                    savedMode.refinementPrompt = trimmedPrompt.isEmpty ? nil : trimmedPrompt
+                    savedMode.appBundleIDs = appBundleIDs.isEmpty ? nil : appBundleIDs
                     onSave(savedMode)
                     dismiss()
                 }
@@ -302,6 +309,7 @@ struct ModeEditSheet: View {
         .frame(width: 450, height: 540)
         .onAppear {
             if let mode = mode {
+                draft = mode
                 name = mode.name
                 description = mode.description
                 refinementPrompt = mode.refinementPrompt ?? ""

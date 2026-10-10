@@ -11,7 +11,6 @@ struct SoundView: View {
         @Bindable var state = appState
         // The toggles, volume and microphone persist across launches.
         @Bindable var audio = appSettings.audio
-        @Bindable var transcription = appSettings.transcription
 
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
@@ -58,13 +57,7 @@ struct SoundView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                        Toggle("Silence Removal", isOn: $transcription.silenceRemoval)
-
-                        Text(
-                            "Removes silent segments from audio before processing. Reduces processing time and improves transcription accuracy."
-                        )
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        AudioProcessingSection()
                     }
 
                     // Sound Effects
