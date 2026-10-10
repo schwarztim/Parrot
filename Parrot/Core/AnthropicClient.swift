@@ -2,23 +2,36 @@ import Foundation
 
 /// Messages API client for Anthropic Claude.
 ///
-/// Sends POST https://api.anthropic.com/v1/messages with x-api-key and
-/// anthropic-version headers. The system prompt is a top-level field (not a
-/// message role) and the response content is an array of typed blocks; the
-/// refined text is the first block with type "text".
+/// Sends POST {baseURL}/messages with x-api-key and anthropic-version
+/// headers. The system prompt is a top-level field (not a message role) and
+/// the response content is an array of typed blocks; the refined text is
+/// the first block with type "text".
 struct AnthropicClient: RefinementClient {
 
     let apiKey: String
     var timeoutInterval: TimeInterval = 30
+    /// API root including the version path.
+    var baseURL: String = AnthropicClient.defaultBaseURL
+    /// How requests are sent; tests pass canned replies.
+    var transport: any HTTPTransport = URLSessionTransport()
 
-    private static let endpoint = "https://api.anthropic.com/v1/messages"
-    private static let apiVersion = "2023-06-01"
+    static let defaultBaseURL = "https://api.anthropic.com/v1"
+    static let apiVersion = "2023-06-01"
     /// Generous ceiling; refinement output is roughly the transcript length.
     private static let maxTokens = 4096
 
     func refine(_ text: String, system: String, model: String) async throws -> String {
-        guard let url = URL(string: Self.endpoint) else {
-            throw RefinementError.invalidEndpoint(Self.endpoint)
+        let request = try makeRequest(text, system: system, model: model)
+        let (data, response) = try await transport.send(request)
+        return try Self.parse(data: data, statusCode: response.statusCode)
+    }
+
+    /// The request `refine` sends.
+    func makeRequest(_ text: String, system: String, model: String) throws -> URLRequest {
+        let base = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let urlString = "\(base)/messages"
+        guard let url = URL(string: urlString), url.scheme != nil else {
+            throw RefinementError.invalidEndpoint(urlString)
         }
 
         var request = URLRequest(url: url)
@@ -35,20 +48,19 @@ struct AnthropicClient: RefinementClient {
             messages: [.init(role: "user", content: text)]
         )
         request.httpBody = try JSONEncoder().encode(body)
+        return request
+    }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
+    /// The reply text, or the provider error, `truncated` (stopped at the
+    /// token limit) or `emptyResponse`.
+    static func parse(data: Data, statusCode: Int) throws -> String {
+        guard (200...299).contains(statusCode) else {
+            throw RefinementError.providerError(statusCode: statusCode, message: decodeErrorMessage(from: data))
+        }
+        guard let message = try? JSONDecoder().decode(MessagesResponse.self, from: data) else {
             throw RefinementError.invalidResponse
         }
-
-        guard (200...299).contains(httpResponse.statusCode) else {
-            throw RefinementError.providerError(
-                statusCode: httpResponse.statusCode,
-                message: Self.decodeErrorMessage(from: data)
-            )
-        }
-
-        let message = try JSONDecoder().decode(MessagesResponse.self, from: data)
+        if message.stopReason == "max_tokens" { throw RefinementError.truncated }
         guard let textBlock = message.content.first(where: { $0.type == "text" }),
               let content = textBlock.text,
               !content.isEmpty
@@ -90,6 +102,12 @@ struct AnthropicClient: RefinementClient {
 
     private struct MessagesResponse: Decodable {
         let content: [ContentBlock]
+        let stopReason: String?
+
+        enum CodingKeys: String, CodingKey {
+            case content
+            case stopReason = "stop_reason"
+        }
 
         struct ContentBlock: Decodable {
             let type: String

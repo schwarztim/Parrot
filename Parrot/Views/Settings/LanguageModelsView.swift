@@ -179,6 +179,9 @@ struct LanguageModelsView: View {
                 .font(.caption)
                 .foregroundStyle(.tertiary)
             keyField("API Key", text: $credentials.anthropicKey)
+
+        case .groq, .gemini, .deepseek, .openAICompatible:
+            EmptyView()
         }
     }
 
