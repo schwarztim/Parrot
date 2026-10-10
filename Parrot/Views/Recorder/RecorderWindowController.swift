@@ -271,10 +271,11 @@ final class RecorderWindowController {
 
     private func makePanel() -> FloatingPanel {
         let hosting = NSHostingView(rootView: RecorderRootView(model: model))
-        // The panel is sized by `fit(to:)` from the content's reported size,
-        // not by the hosting view's constraints.
-        hosting.sizingOptions = []
+        // Measure first: without sizing options the view reports no size.
         let size = hosting.fittingSize
+        // From here the panel is sized by `fit(to:)` from the content's
+        // reported size, not by the hosting view's constraints.
+        hosting.sizingOptions = []
 
         let panel = FloatingPanel(contentRect: NSRect(origin: .zero, size: size))
         panel.contentView = hosting
