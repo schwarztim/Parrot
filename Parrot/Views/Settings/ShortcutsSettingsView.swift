@@ -56,14 +56,6 @@ struct ShortcutsSettingsView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.windowBackgroundColor))
-        // The bindings save themselves; sync the dictation one to the
-        // runtime HotkeyManager.
-        .onChange(of: appSettings.hotkeys.hotkeyBinding) { _, newValue in
-            // Don't push broken keyCode:0 keyboard bindings
-            if newValue.mouseButton != nil || newValue.keyCode != 0 {
-                appState.hotkeyManager?.binding = AppState.toGlobalBinding(newValue)
-            }
-        }
     }
 }
 
