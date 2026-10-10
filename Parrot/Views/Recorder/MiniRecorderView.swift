@@ -1,110 +1,229 @@
 import SwiftUI
 
-/// The interim Mini recorder: a pill with the level bars, timer, cancel and
-/// an expand button, plus a compact card above it for the mode list,
-/// discard guard, result and errors. UI.2 replaces it with the snapping
-/// mini recorder and its attached panel.
+// MARK: - Size Reporting
+
+private struct MiniSizeKey: PreferenceKey {
+    static let defaultValue: CGSize = .zero
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        value = nextValue()
+    }
+}
+
+private extension View {
+    /// Reports the view's size so its panel can fit it.
+    func reportsSize(_ onChange: @escaping (CGSize) -> Void) -> some View {
+        background(
+            GeometryReader { geometry in
+                Color.clear.preference(key: MiniSizeKey.self, value: geometry.size)
+            }
+        )
+        .onPreferenceChange(MiniSizeKey.self, perform: onChange)
+    }
+}
+
+// MARK: - Pill
+
+/// The Mini recorder pill (ui 2.4): record, level bars, mode and expand.
+/// Drag it to another snap point; right click for the context menu.
 struct MiniRecorderView: View {
     let model: RecorderPanelModel
+    let mini: MiniPanelModel
 
-    private var state: RecorderViewState { model.state }
-    private let cardWidth: CGFloat = 300
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var activity: MiniPillActivity { mini.presentation.activity }
 
     var body: some View {
-        VStack(spacing: 8) {
-            if let hud = state.hudModeName {
-                ModeChangedHUDView(modeName: hud)
+        HStack(spacing: 4) {
+            MiniPillButton(control: .record, mini: mini, help: recordHelp, action: model.actions.toggleRecording) {
+                recordIcon
             }
-            if hasCard {
-                card
-            }
-            pill
-        }
-        .animation(.easeInOut(duration: 0.2), value: state.screen)
-    }
+            .disabled(activity == .processing)
 
-    private var hasCard: Bool {
-        [.modeSwitch, .cancelGuard, .result, .error].contains(state.screen)
-    }
+            LevelBarsView(
+                levels: activity == .recording ? model.state.levels : [],
+                barCount: MiniRecorderLogic.barCount(for: activity),
+                barWidth: 3,
+                spacing: 2,
+                height: 16,
+                color: activity == .recording ? .red : .secondary
+            )
+            .frame(width: CGFloat(MiniRecorderLogic.barCount(for: activity)) * 5)
+            .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.8), value: activity)
 
-    // MARK: Pill
-
-    private var pill: some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(state.screen == .processing ? Color.orange : Color.red)
-                .frame(width: 8, height: 8)
-                .modifier(PulseModifier())
-
-            if state.screen == .processing {
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(width: 80, height: 22)
-            } else {
-                LevelBarsView(levels: state.levels, barCount: 14, barWidth: 3, spacing: 2, height: 22)
-                    .frame(width: 80)
+            MiniPillButton(control: .mode, mini: mini, help: "Switch mode", action: model.actions.openModeSwitcher) {
+                Image(systemName: "square.stack.3d.up")
             }
 
-            if state.showsTimer {
-                RecordingTimerText(start: state.startedAt)
-            }
-
-            if state.showsCancel {
-                Button(action: model.actions.requestCancel) {
-                    Image(systemName: "xmark")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Discard recording")
-            }
-
-            Button(action: model.actions.expand) {
+            MiniPillButton(control: .expand, mini: mini, help: "Expand window", action: model.actions.expand) {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
             }
-            .buttonStyle(.plain)
-            .help("Expand window")
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 4)
         .background(
             Capsule()
                 .fill(.ultraThinMaterial)
-                .shadow(color: .black.opacity(0.2), radius: 8, y: 3)
+                .shadow(color: .black.opacity(0.2), radius: 6, y: 2)
         )
         .overlay(
             Capsule()
                 .strokeBorder(Color.white.opacity(0.1), lineWidth: 0.5)
         )
+        .contentShape(Capsule())
+        .gesture(
+            DragGesture(minimumDistance: 3, coordinateSpace: .global)
+                .onChanged { _ in mini.onDragChanged() }
+                .onEnded { _ in mini.onDragEnded() }
+        )
+        .contextMenu {
+            Button("Expand window", action: model.actions.expand)
+            Button("Open History...", action: model.actions.openHistory)
+            Button("Open Settings...", action: model.actions.openSettings)
+        }
+        // Room for the shadow inside the panel.
+        .padding(8)
+        .fixedSize()
+        .reportsSize(mini.onPillSize)
     }
 
-    // MARK: Card
+    private var recordHelp: String {
+        switch activity {
+        case .idle: return "Start recording"
+        case .recording: return "Stop recording"
+        case .processing: return "Working..."
+        }
+    }
 
-    private var card: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            switch state.screen {
-            case .modeSwitch:
+    @ViewBuilder
+    private var recordIcon: some View {
+        switch activity {
+        case .idle:
+            Image(systemName: "mic.fill")
+        case .recording:
+            Image(systemName: "stop.fill")
+                .foregroundStyle(.red)
+                .modifier(PulseModifier(active: !reduceMotion))
+        case .processing:
+            ProgressView()
+                .controlSize(.mini)
+        }
+    }
+}
+
+/// A round pill button with a hover background, which drags suppress.
+private struct MiniPillButton<Label: View>: View {
+    let control: MiniControl
+    let mini: MiniPanelModel
+    let help: String
+    let action: () -> Void
+    @ViewBuilder var label: () -> Label
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            label()
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 24, height: 24)
+                .background(
+                    Circle()
+                        .fill(isHovered && !mini.isDragging ? Color.primary.opacity(0.1) : Color.clear)
+                )
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(help)
+        .onHover { inside in
+            isHovered = inside
+            mini.onHover(inside ? control : nil)
+        }
+    }
+}
+
+// MARK: - Attached Panel
+
+/// The panel attached above or below the pill: the mode list, discard
+/// guard, result, error, the agent slot, or a hover hint.
+struct MiniAttachedView: View {
+    let model: RecorderPanelModel
+    let mini: MiniPanelModel
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private let cardWidth: CGFloat = 300
+
+    var body: some View {
+        Group {
+            if let aux = mini.presentation.aux {
+                card(aux)
+                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.96, anchor: mini.auxPin == .above ? .bottom : .top)))
+            } else if let hint = mini.hint {
+                MiniHintStrip(hint: hint, keycaps: keycaps(for: hint))
+                    .transition(reduceMotion ? .opacity : .move(edge: mini.auxPin == .above ? .bottom : .top).combined(with: .opacity))
+            }
+        }
+        .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85), value: mini.presentation.aux)
+        .padding(8)
+        .fixedSize()
+        .reportsSize(mini.onAuxSize)
+    }
+
+    private func keycaps(for hint: MiniHint) -> [String] {
+        switch hint {
+        case .start: return model.toggleKeycaps
+        case .mode: return model.changeModeKeycaps
+        case .cancel: return [model.shortcuts.cancel]
+        case .modeSelected, .stop, .expand: return []
+        }
+    }
+
+    private func card(_ aux: MiniAux) -> some View {
+        let state = model.state
+        return VStack(alignment: .leading, spacing: 10) {
+            switch aux {
+            case .modeList:
                 ModeSwitcherView(
                     modes: model.modes,
                     selectedID: model.selectedModeID,
                     onSelect: model.actions.selectMode
                 )
-            case .cancelGuard:
+            case .discard:
+                MiniHintStrip(hint: .cancel, keycaps: [model.shortcuts.cancel], framed: false)
                 CancelGuardView(onDiscard: model.actions.discard, onResume: model.actions.resume)
             case .result:
+                HStack {
+                    Text("Result")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        mini.isAuxPinned.toggle()
+                    } label: {
+                        Image(systemName: mini.isAuxPinned ? "pin.fill" : "pin")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .help(mini.isAuxPinned ? "Unpin: close on outside click" : "Pin: keep open on outside click")
+                }
                 ResultPreview(text: state.resultText ?? "", width: cardWidth - 24, onCopy: model.actions.copyResult)
-            default:
-                EmptyView()
+            case .error:
+                if let banner = state.banner {
+                    RecorderBannerView(banner: banner, onSwitchMic: model.actions.switchMic)
+                }
+            case .agent:
+                // AGT fills this slot with the reply composer.
+                Text("Agent replies appear here.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
-            if let banner = state.banner {
-                RecorderBannerView(
-                    banner: banner,
-                    onSwitchMic: state.screen == .error ? model.actions.switchMic : nil
-                )
+
+            if model.micPickerShown, let devices = model.devices {
+                DevicePickerView(devices: devices, onPick: model.actions.pickedMic)
             }
-            if state.primaryButton == .close {
+
+            if aux == .result || aux == .error {
                 HStack {
                     Spacer()
                     Button(action: model.actions.close) {
@@ -128,5 +247,50 @@ struct MiniRecorderView: View {
             RoundedRectangle(cornerRadius: 12)
                 .strokeBorder(Color.white.opacity(0.1), lineWidth: 0.5)
         )
+    }
+}
+
+/// Icon, text and shortcut keycaps in a small strip.
+struct MiniHintStrip: View {
+    let hint: MiniHint
+    let keycaps: [String]
+    var framed = true
+
+    var body: some View {
+        let strip = HStack(spacing: 8) {
+            Image(systemName: hint.systemImage)
+                .foregroundStyle(.secondary)
+            Text(hint.title)
+                .font(.callout.weight(.medium))
+                .lineLimit(1)
+            ForEach(Array(keycaps.enumerated()), id: \.offset) { _, cap in
+                Keycap(label: cap)
+            }
+        }
+        if framed {
+            strip
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(.regularMaterial))
+                .overlay(Capsule().strokeBorder(Color.white.opacity(0.1), lineWidth: 0.5))
+        } else {
+            strip
+        }
+    }
+}
+
+// MARK: - Snap Indicator
+
+/// The marker shown at a snap point while the pill is dragged.
+struct SnapIndicatorView: View {
+    var isNearest: Bool
+    var isEngaged: Bool
+
+    var body: some View {
+        Capsule()
+            .fill(Color.accentColor.opacity(isEngaged ? 0.9 : (isNearest ? 0.55 : 0.2)))
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.6), lineWidth: 1))
+            .frame(width: 40, height: 10)
+            .padding(2)
     }
 }

@@ -143,7 +143,18 @@ final class ShellTests: XCTestCase {
         XCTAssertNil(settings.recorder.positionY)
         XCTAssertFalse(settings.recorder.closeAfterResult)
         XCTAssertFalse(settings.general.menubarClickRecords)
-        for key in ["parrot.recorder.positionX", "parrot.recorder.positionY", "parrot.recorder.closeAfterResult", "parrot.general.menubarClickRecords"] {
+        XCTAssertTrue(settings.recorder.alwaysShowMini)
+        XCTAssertEqual(settings.recorder.snapPointID, 0)
+        XCTAssertFalse(settings.general.showInDock)
+        XCTAssertEqual(settings.general.theme, .system)
+        XCTAssertEqual(settings.general.typingWPM, 40)
+        XCTAssertEqual(settings.general.onboardingProgress, 0)
+        XCTAssertEqual(settings.general.dismissedToasts, [])
+        for key in [
+            "parrot.recorder.positionX", "parrot.recorder.positionY", "parrot.recorder.closeAfterResult", "parrot.general.menubarClickRecords",
+            "parrot.recorder.alwaysShowMini", "parrot.recorder.snapPointID", "parrot.general.showInDock", "parrot.general.theme",
+            "parrot.general.typingWPM", "parrot.general.onboardingProgress", "parrot.general.dismissedToasts",
+        ] {
             XCTAssertNil(defaults.object(forKey: key), "\(key) written on init")
         }
     }
@@ -154,12 +165,23 @@ final class ShellTests: XCTestCase {
         first.recorder.positionY = -40
         first.recorder.closeAfterResult = true
         first.general.menubarClickRecords = true
+        first.general.showInDock = true
+        first.general.theme = .dark
+        first.general.typingWPM = 72.5
+        first.general.onboardingProgress = 3
+        first.general.dismissedToasts = ["home.stats", "modes.create"]
 
         let second = AppSettings(store: SettingsStore(defaults: defaults), secrets: InMemorySecretStore())
         XCTAssertEqual(second.recorder.positionX, 120)
         XCTAssertEqual(second.recorder.positionY, -40)
         XCTAssertTrue(second.recorder.closeAfterResult)
         XCTAssertTrue(second.general.menubarClickRecords)
+        XCTAssertTrue(second.general.showInDock)
+        XCTAssertEqual(second.general.theme, .dark)
+        XCTAssertEqual(second.general.typingWPM, 72.5)
+        XCTAssertEqual(second.general.onboardingProgress, 3)
+        XCTAssertEqual(second.general.dismissedToasts, ["home.stats", "modes.create"])
+        XCTAssertEqual(defaults.string(forKey: "parrot.general.theme"), "dark")
 
         // Clearing the position removes the keys (back to the default spot).
         second.recorder.positionX = nil

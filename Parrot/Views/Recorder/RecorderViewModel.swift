@@ -31,6 +31,8 @@ struct RecorderInput: Equatable {
     var selectedModeName: String?
     /// A mode chosen a moment ago, for the brief mode-changed HUD.
     var modeChangedName: String?
+    /// "Always show": the Mini pill stays up while idle.
+    var alwaysShowMini = false
 }
 
 extension RecorderInput {
@@ -40,7 +42,8 @@ extension RecorderInput {
         live: LiveRecordingState,
         style: RecordingWindowStyle,
         selectedModeName: String?,
-        modeChangedName: String?
+        modeChangedName: String?,
+        alwaysShowMini: Bool = false
     ) {
         self.init(
             phase: live.phase,
@@ -61,7 +64,8 @@ extension RecorderInput {
             processingProgress: live.processingProgress,
             style: style,
             selectedModeName: selectedModeName,
-            modeChangedName: modeChangedName
+            modeChangedName: modeChangedName,
+            alwaysShowMini: alwaysShowMini
         )
     }
 }
@@ -90,6 +94,8 @@ enum RecorderScreen: Equatable {
     case cancelGuard
     /// A brief "mode changed" note with no recording in progress.
     case modeChanged
+    /// The Mini pill kept on screen while idle by "Always show".
+    case idle
 }
 
 /// The bottom bar's main button.
@@ -175,6 +181,8 @@ struct RecorderViewState: Equatable {
     var progress: Double?
     /// The mode-changed note shown over the content, if any.
     var hudModeName: String?
+    /// The dictation phase, for the Mini pill's record button.
+    var phase: DictationPhase = .idle
 
     var isVisible: Bool { screen != .hidden }
 }
@@ -262,6 +270,9 @@ enum RecorderViewModel {
         if input.style == .none, screen != .modeSwitch, screen != .modeChanged {
             screen = .hidden
         }
+        if screen == .hidden, input.style == .mini, input.alwaysShowMini {
+            screen = .idle
+        }
 
         return RecorderViewState(
             screen: screen,
@@ -280,7 +291,8 @@ enum RecorderViewModel {
             startedAt: input.startedAt,
             levels: input.levels,
             progress: screen == .processing ? input.processingProgress : nil,
-            hudModeName: screen == .modeSwitch ? nil : input.modeChangedName
+            hudModeName: screen == .modeSwitch ? nil : input.modeChangedName,
+            phase: input.phase
         )
     }
 
@@ -317,7 +329,7 @@ enum RecorderViewModel {
         switch screen {
         case .ready, .wave, .liveText: return .stop
         case .result, .error, .modeSwitch: return .close
-        case .hidden, .processing, .cancelGuard, .modeChanged: return .none
+        case .hidden, .processing, .cancelGuard, .modeChanged, .idle: return .none
         }
     }
 

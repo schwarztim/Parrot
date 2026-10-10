@@ -20,9 +20,20 @@ final class WindowManager {
     init(appState: AppState, appSettings: AppSettings) {
         self.appState = appState
         self.appSettings = appSettings
-        recorder = RecorderWindowController.install(appState: appState, settings: appSettings) { [weak self] in
-            self?.showTab(.sound)
-        }
+        recorder = RecorderWindowController.install(
+            appState: appState,
+            settings: appSettings,
+            openSoundSettings: { [weak self] in
+                self?.showTab(.sound)
+            },
+            openTab: { [weak self] tab in
+                if let tab {
+                    self?.showTab(tab)
+                } else {
+                    self?.openParrot()
+                }
+            }
+        )
     }
 
     /// Opens the main window on `tab` (onboarding instead, if unfinished).
