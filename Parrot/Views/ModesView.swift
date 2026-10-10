@@ -2,6 +2,9 @@ import AppKit
 import SwiftUI
 
 struct ModesView: View {
+    /// Shown in the sidebar (see SidebarTab.isAvailable).
+    static let isReady = true
+
     @Environment(AppState.self) private var appState
     @State private var showingAddSheet = false
     @State private var editingMode: Mode?

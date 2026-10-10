@@ -1,6 +1,9 @@
 import SwiftUI
 
 struct VocabularyView: View {
+    /// Shown in the sidebar (see SidebarTab.isAvailable).
+    static let isReady = true
+
     @Environment(AppState.self) private var appState
     @Environment(AppSettings.self) private var appSettings
     @State private var searchText = ""

@@ -1,6 +1,9 @@
 import SwiftUI
 
-struct ModelsView: View {
+/// The voice model library. [ASR]
+///
+/// Shown as the Voice segment of the Models tab.
+struct VoiceModelsView: View {
     @Environment(AppState.self) private var appState
     @Environment(AppSettings.self) private var appSettings
 
@@ -9,7 +12,7 @@ struct ModelsView: View {
             VStack(alignment: .leading, spacing: 0) {
                 // Header
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Models")
+                    Text("Voice Models")
                         .font(.title2.weight(.semibold))
                     Text("Voice recognition model library")
                         .font(.subheadline)
@@ -275,7 +278,7 @@ struct ModelsView: View {
 }
 
 #Preview {
-    ModelsView()
+    VoiceModelsView()
         .environment(AppState())
         .environment(AppSettings())
         .frame(width: 500, height: 600)

@@ -2,6 +2,9 @@ import AppKit
 import SwiftUI
 
 struct HistoryView: View {
+    /// Shown in the sidebar (see SidebarTab.isAvailable).
+    static let isReady = true
+
     @Environment(AppState.self) private var appState
     @Environment(AppSettings.self) private var appSettings
 

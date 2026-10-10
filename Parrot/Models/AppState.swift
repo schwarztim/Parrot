@@ -196,9 +196,9 @@ final class AppState {
     /// e.g. "Mail (Subject)". Nil when destination-aware refinement is off.
     var destinationLabel: String? { services.live.destinationLabel }
 
-    /// Set by the Home refinement nudge to request the main window switch to
-    /// the Configuration tab. MainWindow observes and resets it.
-    var requestConfigurationTab: Bool = false
+    /// The main window's selected tab. Views switch tabs with
+    /// `navigation.request(_:)`.
+    let navigation = NavigationModel()
 
     // Sound / Level Monitoring
     var inputLevel: Float = 0

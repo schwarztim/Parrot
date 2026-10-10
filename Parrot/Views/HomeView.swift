@@ -1,6 +1,9 @@
 import SwiftUI
 
 struct HomeView: View {
+    /// Shown in the sidebar (see SidebarTab.isAvailable).
+    static let isReady = true
+
     @Environment(AppState.self) private var appState
     @Environment(AppSettings.self) private var appSettings
 
@@ -65,7 +68,8 @@ struct HomeView: View {
             HStack {
                 Button("Set up") {
                     appSettings.general.refinementNudgeDismissed = true
-                    appState.requestConfigurationTab = true
+                    appState.navigation.modelsSegment = .language
+                    appState.navigation.request(.models)
                 }
                 .buttonStyle(.borderedProminent)
 

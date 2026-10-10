@@ -1,7 +1,9 @@
 import SwiftUI
 
-struct ConfigurationView: View {
-    @Environment(AppState.self) private var appState
+/// AI refinement: provider, model, keys and a connection test. [LLM]
+///
+/// Shown as the Language segment of the Models tab.
+struct LanguageModelsView: View {
     @Environment(AppSettings.self) private var appSettings
     @State private var showApiKey = false
     @State private var isTestingConnection = false
@@ -15,80 +17,21 @@ struct ConfigurationView: View {
     }
 
     var body: some View {
-        @Bindable var state = appState
-        @Bindable var recorder = appSettings.recorder
-        @Bindable var hotkeys = appSettings.hotkeys
         @Bindable var refinement = appSettings.refinement
 
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 // Header
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Configuration")
+                    Text("Language Models")
                         .font(.title2.weight(.semibold))
-                    Text("Keyboard shortcuts, recording style, and general settings")
+                    Text("AI refinement of your transcripts")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 .padding(20)
 
-                // Settings Form
                 Form {
-                    // Recording Window Style
-                    Section("Recording Window") {
-                        Picker("Window Style", selection: $recorder.recordingWindowStyle) {
-                            Text("Classic").tag(RecordingWindowStyle.classic)
-                            Text("Mini").tag(RecordingWindowStyle.mini)
-                            Text("None").tag(RecordingWindowStyle.none)
-                        }
-                        .pickerStyle(.radioGroup)
-
-                        Text(windowStyleDescription)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    // Keyboard Shortcuts
-                    Section("Keyboard Shortcuts") {
-                        HotkeyRecorderView(
-                            label: "Toggle Recording",
-                            requiredBinding: $hotkeys.hotkeyBinding
-                        )
-
-                        HotkeyRecorderView(
-                            label: "Cancel Recording",
-                            binding: $hotkeys.cancelHotkeyBinding
-                        )
-
-                        HotkeyRecorderView(
-                            label: "Push to Talk (hold)",
-                            binding: $hotkeys.pushToTalkBinding
-                        )
-
-                        HotkeyRecorderView(
-                            label: "Enhance Recording",
-                            binding: $state.enhanceRecordingHotkey
-                        )
-
-                        Text("Enhance: Records, transcribes, then polishes your text with AI before pasting.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    // General
-                    Section("General") {
-                        Toggle("Launch at Login", isOn: Binding(
-                            get: { appState.launchAtLogin },
-                            set: { appState.setLaunchAtLogin($0) }
-                        ))
-
-                        Text(
-                            "Automatically start Parrot when you log in to your Mac."
-                        )
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    }
-
                     // AI Refinement
                     Section("AI Refinement") {
                         Toggle("Refine transcripts with AI", isOn: $refinement.refinementEnabled)
@@ -166,18 +109,6 @@ struct ConfigurationView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.windowBackgroundColor))
-        // Show the real login item status, which can change in System Settings.
-        .onAppear {
-            appState.refreshLaunchAtLogin()
-        }
-        // The bindings save themselves; sync the dictation one to the
-        // runtime HotkeyManager.
-        .onChange(of: appSettings.hotkeys.hotkeyBinding) { _, newValue in
-            // Don't push broken keyCode:0 keyboard bindings
-            if newValue.mouseButton != nil || newValue.keyCode != 0 {
-                appState.hotkeyManager?.binding = AppState.toGlobalBinding(newValue)
-            }
-        }
     }
 
     // MARK: - Provider Fields
@@ -307,22 +238,10 @@ struct ConfigurationView: View {
             isLoadingModels = false
         }
     }
-
-    private var windowStyleDescription: String {
-        switch appSettings.recorder.recordingWindowStyle {
-        case .classic:
-            return "Larger window with full waveform visualization"
-        case .mini:
-            return "Compact horizontal bar"
-        case .none:
-            return "No recording window shown"
-        }
-    }
 }
 
 #Preview {
-    ConfigurationView()
-        .environment(AppState())
+    LanguageModelsView()
         .environment(AppSettings())
         .frame(width: 500, height: 600)
 }
