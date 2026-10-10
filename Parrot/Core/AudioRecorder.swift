@@ -36,6 +36,12 @@ final class AudioRecorder {
 
     private let bufferLock = NSLock()
 
+    /// Receivers of every captured buffer, guarded by `sinkLock`.
+    private var sinks: [AudioFrameSink] = []
+    /// Samples fanned out since the current recording started.
+    private var emittedSampleCount = 0
+    private let sinkLock = NSLock()
+
     // MARK: - Initialization
 
     init() {
@@ -57,6 +63,10 @@ final class AudioRecorder {
         currentInputLevel = 0
         didReachCapacity = false
         bufferLock.unlock()
+
+        sinkLock.lock()
+        emittedSampleCount = 0
+        sinkLock.unlock()
 
         let inputNode = engine.inputNode
         let hardwareFormat = inputNode.inputFormat(forBus: 0)
@@ -122,6 +132,26 @@ final class AudioRecorder {
         bufferLock.unlock()
 
         return result
+    }
+
+    // MARK: - Frame Sinks
+
+    /// Registers a receiver for every captured buffer, converted to 16 kHz
+    /// mono Float32, while recording. Frames arrive on the audio thread.
+    /// The recorder keeps a strong reference until `removeSink(_:)`.
+    func addSink(_ sink: AudioFrameSink) {
+        sinkLock.lock()
+        if !sinks.contains(where: { $0 === sink }) {
+            sinks.append(sink)
+        }
+        sinkLock.unlock()
+    }
+
+    /// Stops sending frames to `sink`.
+    func removeSink(_ sink: AudioFrameSink) {
+        sinkLock.lock()
+        sinks.removeAll { $0 === sink }
+        sinkLock.unlock()
     }
 
     // MARK: - Level Monitoring (no recording)
@@ -228,7 +258,9 @@ final class AudioRecorder {
 
     // MARK: - Private Helpers
 
-    private func processCapturedBuffer(
+    /// Converts one tap buffer to 16 kHz mono, fans it out to the sinks and
+    /// appends it to the recording. Internal so tests can feed buffers.
+    func processCapturedBuffer(
         _ buffer: AVAudioPCMBuffer,
         converter: AVAudioConverter?,
         desiredFormat: AVAudioFormat
@@ -291,6 +323,8 @@ final class AudioRecorder {
             outputSamples = Array(UnsafeBufferPointer(start: data[0], count: count))
         }
 
+        fanOut(outputSamples)
+
         bufferLock.lock()
         let remaining = maxSampleCount - samples.count
         if remaining > 0 {
@@ -303,6 +337,21 @@ final class AudioRecorder {
             didReachCapacity = true
         }
         bufferLock.unlock()
+    }
+
+    /// Sends converted samples to every sink, on the calling (audio) thread.
+    private func fanOut(_ samples: [Float]) {
+        sinkLock.lock()
+        let receivers = sinks
+        let startSample = emittedSampleCount
+        emittedSampleCount += samples.count
+        sinkLock.unlock()
+
+        guard !receivers.isEmpty else { return }
+        let frame = AudioFrame(samples: samples, startSample: startSample)
+        for sink in receivers {
+            sink.consume(frame)
+        }
     }
 
     private static func hasInputChannels(_ deviceID: AudioDeviceID) -> Bool {
