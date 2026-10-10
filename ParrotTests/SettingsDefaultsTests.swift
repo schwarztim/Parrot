@@ -48,4 +48,13 @@ final class SettingsDefaultsTests: XCTestCase {
         // ui 3.5 row 1, `showApplicationInDock`: true.
         XCTAssertTrue(settings.general.showInDock, "show in Dock")
     }
+
+    func testExistingInstallStaysMenuBarOnly() {
+        // An install that already finished onboarding was menu-bar-only;
+        // upgrading must not add a Dock icon on its own.
+        defaults.set(true, forKey: "parrot.hasCompletedOnboarding")
+        let settings = AppSettings(store: SettingsStore(defaults: defaults), secrets: InMemorySecretStore())
+
+        XCTAssertFalse(settings.general.showInDock)
+    }
 }

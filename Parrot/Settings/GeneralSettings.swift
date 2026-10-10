@@ -115,7 +115,9 @@ final class GeneralSettings {
         successfulDictationCount = store.int(Key.successfulDictationCount, default: 0)
         refinementNudgeDismissed = store.bool(Key.refinementNudgeDismissed, default: false)
         menubarClickRecords = store.bool(Key.menubarClickRecords, default: false)
-        showInDock = store.bool(Key.showInDock, default: true)
+        // Spec default is a Dock icon, but an existing install was a
+        // menu-bar-only app; it keeps that until the user turns this on.
+        showInDock = store.bool(Key.showInDock, default: !store.contains(Key.hasCompletedOnboarding))
         theme = store.value(Key.theme, default: AppTheme.system)
         typingWPM = store.double(Key.typingWPM, default: Self.defaultTypingWPM)
         onboardingProgress = store.int(Key.onboardingProgress, default: 0)
