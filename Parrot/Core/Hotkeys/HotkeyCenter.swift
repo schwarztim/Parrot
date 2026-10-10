@@ -146,10 +146,12 @@ final class HotkeyCenter {
         dismissModeSwitcher(restoringSelection: false)
     }
 
-    /// Makes `mode` the selected mode.
+    /// Makes `mode` the selected mode, and the mode of the recording in
+    /// progress, if any.
     func select(_ mode: Mode) {
         guard let modeManager = services?.modes else { return }
         modeManager.selectMode(mode)
+        controller?.switchMode(to: modeManager.selectedMode)
         // AppState keeps its own copy of the selection for its views.
         (controller?.delegate as? AppState)?.currentMode = modeManager.selectedMode
     }

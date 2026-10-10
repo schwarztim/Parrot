@@ -193,6 +193,17 @@ final class DictationController {
         }
     }
 
+    /// The user picked another mode while starting or recording (the mode
+    /// switcher, the recorder, the menu): this recording uses it. RefineStage
+    /// renders the prompt again when it was rendered for another mode.
+    /// Ignored once the mic has closed.
+    func switchMode(to mode: Mode) {
+        guard phase == .starting || phase == .recording, let session, session.mode != mode else { return }
+        diagLog("[Parrot:AppState] Mode switched mid-recording to \(mode.name)")
+        session.mode = mode
+        services.live.modeName = mode.name
+    }
+
     /// Runs the stages again on a history entry (for DATA). The stages read
     /// `session.source` to load audio or text. Returns nil when busy.
     func reprocess(historyID: Int64, mode: Mode?) async -> DictationSession? {

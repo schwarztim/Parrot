@@ -43,7 +43,7 @@ final class HistoryStatsService: StatsService {
 
     private let history: HistoryStore?
     /// Words per minute the user types, read on every snapshot.
-    var typingWPM: () -> Double = { HistorySettings.defaultTypingWPM }
+    var typingWPM: () -> Double = { GeneralSettings.defaultTypingWPM }
 
     init(history: HistoryStore?) {
         self.history = history

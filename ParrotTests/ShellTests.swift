@@ -253,7 +253,7 @@ final class ShellTests: XCTestCase {
         XCTAssertFalse(settings.general.menubarClickRecords)
         XCTAssertTrue(settings.recorder.alwaysShowMini)
         XCTAssertEqual(settings.recorder.snapPointID, 0)
-        XCTAssertFalse(settings.general.showInDock)
+        XCTAssertTrue(settings.general.showInDock)
         XCTAssertEqual(settings.general.theme, .system)
         XCTAssertEqual(settings.general.typingWPM, 40)
         XCTAssertEqual(settings.general.onboardingProgress, 0)
@@ -273,7 +273,7 @@ final class ShellTests: XCTestCase {
         first.recorder.positionY = -40
         first.recorder.closeAfterResult = true
         first.general.menubarClickRecords = true
-        first.general.showInDock = true
+        first.general.showInDock = false
         first.general.theme = .dark
         first.general.typingWPM = 72.5
         first.general.onboardingProgress = 3
@@ -284,7 +284,7 @@ final class ShellTests: XCTestCase {
         XCTAssertEqual(second.recorder.positionY, -40)
         XCTAssertTrue(second.recorder.closeAfterResult)
         XCTAssertTrue(second.general.menubarClickRecords)
-        XCTAssertTrue(second.general.showInDock)
+        XCTAssertFalse(second.general.showInDock)
         XCTAssertEqual(second.general.theme, .dark)
         XCTAssertEqual(second.general.typingWPM, 72.5)
         XCTAssertEqual(second.general.onboardingProgress, 3)

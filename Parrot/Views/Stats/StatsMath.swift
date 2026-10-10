@@ -82,6 +82,13 @@ enum StatsMath {
         value.formatted(.number)
     }
 
+    /// The most used mode tile: the mode's name, or "None" before any
+    /// dictation recorded one.
+    static func modeText(_ name: String?) -> String {
+        let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "None" : trimmed
+    }
+
     /// Deterministic bar heights (0.15...1) for the share card's waveform
     /// art: the same stats always draw the same fingerprint.
     static func fingerprint(seed: Int, count: Int) -> [Double] {

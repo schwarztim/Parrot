@@ -639,4 +639,5 @@ final class FakeRecorderPresenter: RecorderUIPresenting {
     var events: [String] = []
     func showRecorder() { events.append("show") }
     func hideRecorder() { events.append("hide") }
+    func showLidClosedWarning() { events.append("lid") }
 }

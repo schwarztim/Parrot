@@ -394,11 +394,13 @@ struct LanguageModelsView: View {
         syncModes()
     }
 
-    /// Keeps AppState's copy of the modes equal to the manager's.
+    /// Keeps AppState's copy of the modes equal to the manager's. Writes
+    /// `currentMode` only when it differs: a write also moves a recording
+    /// in progress to that mode, which a model change is not.
     private func syncModes() {
         guard let appState, let manager = appState.modeManager else { return }
         if appState.modes != manager.modes { appState.modes = manager.modes }
-        appState.currentMode = manager.selectedMode
+        if appState.currentMode != manager.selectedMode { appState.currentMode = manager.selectedMode }
     }
 
     private func setContactCard(_ on: Bool) {
