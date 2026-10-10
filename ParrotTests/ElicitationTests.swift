@@ -100,20 +100,20 @@ final class ElicitationTests: XCTestCase {
     func testBridgeSendsAllAnswersTogether() async throws {
         let fixture = AgentFixture()
         addTeardownBlock { @MainActor in fixture.cleanUp() }
-        fixture.bridge.ingest(fixture.update(.question, session: "a", request: "a1"))
+        fixture.bridge.ingest(fixture.update(.question, session: "a", request: "request-a1"))
         XCTAssertEqual(fixture.bridge.elicitation?.questions.count, 2)
 
         // Step one, single select: a click advances.
         await fixture.bridge.chooseOption("Vue")
         XCTAssertEqual(fixture.bridge.elicitation?.step, 1)
-        XCTAssertNil(try fixture.response(for: "a1"))
+        XCTAssertNil(try fixture.response(for: "request-a1"))
 
         // Step two, multi select: speak, then send.
         await fixture.bridge.receiveDictation("router and state")
-        XCTAssertNil(try fixture.response(for: "a1"), "multi select waits for Send")
+        XCTAssertNil(try fixture.response(for: "request-a1"), "multi select waits for Send")
         await fixture.bridge.advanceOrSend()
 
-        let response = try XCTUnwrap(try fixture.response(for: "a1"))
+        let response = try XCTUnwrap(try fixture.response(for: "request-a1"))
         XCTAssertEqual(response.action, .answer)
         XCTAssertEqual(response.answers, ["Which framework?": ["Vue"], "Which extras?": ["Router", "State"]])
         XCTAssertNil(fixture.bridge.elicitation, "state clears with the session")
@@ -123,11 +123,11 @@ final class ElicitationTests: XCTestCase {
     func testNewRequestClearsElicitationState() {
         let fixture = AgentFixture()
         addTeardownBlock { @MainActor in fixture.cleanUp() }
-        fixture.bridge.ingest(fixture.update(.question, session: "a", request: "a1"))
+        fixture.bridge.ingest(fixture.update(.question, session: "a", request: "request-a1"))
         fixture.bridge.elicitation?.choose("React")
-        fixture.bridge.ingest(fixture.update(.question, session: "a", request: "a2"))
+        fixture.bridge.ingest(fixture.update(.question, session: "a", request: "request-a2"))
         XCTAssertEqual(fixture.bridge.elicitation?.isSelected("React"), false)
-        fixture.bridge.ingest(fixture.update(.stop, session: "a", request: "a3"))
+        fixture.bridge.ingest(fixture.update(.stop, session: "a", request: "request-a3"))
         XCTAssertNil(fixture.bridge.elicitation)
     }
 }

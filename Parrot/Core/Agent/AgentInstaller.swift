@@ -253,6 +253,9 @@ struct AgentInstaller {
     private func write(_ root: [String: Any], to file: URL) throws {
         var data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
         data.append(0x0A)
-        try AgentHookPaths.writeAtomically(data, to: file)
+        // Keep the file's own mode (a new settings file gets 0644, as the
+        // CLIs create theirs).
+        let mode = (try? FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber)?.uint16Value
+        try AgentHookPaths.writeAtomically(data, to: file, permissions: mode_t(mode ?? 0o644))
     }
 }

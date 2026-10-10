@@ -13,9 +13,15 @@ import Foundation
 //
 // Flow: the CLI runs the helper with the event JSON on stdin. The helper
 // drops an `AgentInboxMessage` into Parrot's inbox, polls for an
-// `AgentHookResponse` at `responseFile`, and prints the decision JSON the
-// CLI expects. No answer in time: it prints nothing and exits 0, so the
-// CLI's own terminal prompt takes over.
+// `AgentHookResponse` at `agent/responses/<requestId>.json`, and prints the
+// decision JSON the CLI expects. No answer in time: it prints nothing and
+// exits 0, so the CLI's own terminal prompt takes over.
+//
+// Trust: nothing in a message names a path. Both sides derive every file
+// from the request id, which must match `^[A-Za-z0-9-]{8,64}$`. Folders are
+// 0700 and owned by the user, files 0600. The `parrot://` fallback link
+// carries only ids and names (URLs reach system logs), and anyone can open
+// one, so the app treats link requests as untrusted.
 
 // MARK: - Any JSON
 
@@ -275,8 +281,8 @@ struct HookPermission: Codable, Equatable, Sendable {
 
 // MARK: - Inbox Message (helper to app)
 
-/// One file in Parrot's agent inbox, or the payload of a
-/// `parrot://agent-update` link when the inbox cannot be written.
+/// One file in Parrot's agent inbox. Only the helper writes it, into a
+/// folder only the user can write.
 struct AgentInboxMessage: Codable, Equatable, Sendable {
     enum Kind: String, Codable, Sendable {
         /// A new request (or a newer one for the same session).
@@ -295,10 +301,9 @@ struct AgentInboxMessage: Codable, Equatable, Sendable {
     var summary: String?
     /// The agent's last message (Markdown), or the plan text.
     var message: String?
-    /// Set when the message was too large to inline.
-    var messageFile: String?
-    /// Where Parrot writes the `AgentHookResponse`.
-    var responseFile: String?
+    /// True when the full message was too large to inline and sits in
+    /// `agent/messages/<requestId>.md`.
+    var messageInFile: Bool?
     var cwd: String?
     var project: String?
     var branch: String?
@@ -311,7 +316,7 @@ struct AgentInboxMessage: Codable, Equatable, Sendable {
     /// Unix seconds.
     var createdAt: Double
 
-    /// Messages longer than this go to `messageFile`.
+    /// Messages longer than this also go to a message file.
     static let inlineLimit = 60_000
 
     static func dismiss(agent: HookAgent, sessionId: String, requestId: String, hookPid: Int32?) -> AgentInboxMessage {
@@ -327,13 +332,12 @@ struct AgentInboxMessage: Codable, Equatable, Sendable {
         event: HookEvent,
         input: HookInput,
         requestId: String,
-        responseFile: String,
         hookPid: Int32,
         branch: String?
     ) -> AgentInboxMessage {
         var message = AgentInboxMessage(
             kind: .update, agent: agent, sessionId: input.sessionId, requestId: requestId,
-            event: event, responseFile: responseFile, cwd: input.cwd,
+            event: event, cwd: input.cwd,
             project: input.cwd.map { URL(fileURLWithPath: $0).lastPathComponent },
             branch: branch, title: input.sessionTitle, hookPid: hookPid,
             permissionMode: input.permissionMode, createdAt: Date().timeIntervalSince1970
@@ -371,53 +375,84 @@ struct AgentInboxMessage: Codable, Equatable, Sendable {
         return line.count > 140 ? String(line.prefix(139)) + "…" : line
     }
 
-    /// `parrot://agent-update?payload=<base64url JSON>` (or agent-dismiss),
-    /// the fallback when the inbox write fails. Long messages are cut.
-    var deepLink: URL? {
-        var copy = self
-        if let text = copy.message, text.count > 4_000 {
-            copy.message = String(text.prefix(4_000))
+    /// True for ids the helper makes (UUID strings): letters, digits and
+    /// dashes, 8 to 64 characters. Anything else is rejected everywhere.
+    static func isValidRequestId(_ id: String) -> Bool {
+        (8...64).contains(id.utf8.count) && id.utf8.allSatisfy { byte in
+            (byte >= 0x30 && byte <= 0x39) || (byte >= 0x41 && byte <= 0x5A) || (byte >= 0x61 && byte <= 0x7A) || byte == 0x2D
         }
-        guard let data = try? JSONEncoder().encode(copy) else { return nil }
-        var components = URLComponents()
-        components.scheme = "parrot"
-        components.host = kind == .update ? "agent-update" : "agent-dismiss"
-        components.queryItems = [URLQueryItem(name: "payload", value: Self.base64URL(data))]
-        return components.url
-    }
-
-    static func base64URL(_ data: Data) -> String {
-        data.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-    }
-
-    static func data(base64URL text: String) -> Data? {
-        var base64 = text
-            .replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")
-        while base64.count % 4 != 0 { base64 += "=" }
-        return Data(base64Encoded: base64)
     }
 }
 
-extension AgentInboxMessage {
-    /// Decodes the payload of a `parrot://agent-update` or `agent-dismiss`
-    /// link. (In an extension so the memberwise initializer stays.)
-    init?(deepLink url: URL) {
-        guard let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
-              let payload = items.first(where: { $0.name == "payload" })?.value,
-              let data = Self.data(base64URL: payload),
-              let message = try? JSONDecoder().decode(AgentInboxMessage.self, from: data)
+// MARK: - Fallback Link (helper to app, untrusted)
+
+/// `parrot://agent-update?request=<id>&agent=<cli>&event=<kind>&project=<name>`,
+/// the fallback when the inbox cannot be written (or agent-dismiss).
+///
+/// It carries no message, tool input, session id or path: URLs land in
+/// system logs. Any page or process can open one, so the app shows such a
+/// request with "details unavailable" and limits what it can answer.
+struct AgentDeepLink: Equatable, Sendable {
+    var kind: AgentInboxMessage.Kind
+    var requestId: String
+    var agent: HookAgent
+    var event: HookEvent?
+    var project: String?
+
+    init(kind: AgentInboxMessage.Kind, requestId: String, agent: HookAgent, event: HookEvent?, project: String?) {
+        self.kind = kind
+        self.requestId = requestId
+        self.agent = agent
+        self.event = event
+        self.project = project
+    }
+
+    init(message: AgentInboxMessage) {
+        self.init(
+            kind: message.kind, requestId: message.requestId, agent: message.agent,
+            event: message.event, project: message.project.map { String($0.prefix(100)) }
+        )
+    }
+
+    var url: URL? {
+        var components = URLComponents()
+        components.scheme = "parrot"
+        components.host = kind == .update ? "agent-update" : "agent-dismiss"
+        var items = [
+            URLQueryItem(name: "request", value: requestId),
+            URLQueryItem(name: "agent", value: agent.rawValue),
+        ]
+        if let event { items.append(URLQueryItem(name: "event", value: event.rawValue)) }
+        if let project { items.append(URLQueryItem(name: "project", value: project)) }
+        components.queryItems = items
+        return components.url
+    }
+
+    /// Parses a link. Nil unless the request id is valid, the agent is
+    /// known and an update names its event. Other query items are ignored.
+    init?(url: URL) {
+        let host = url.host()?.lowercased()
+        let kind: AgentInboxMessage.Kind
+        switch host {
+        case "agent-update": kind = .update
+        case "agent-dismiss": kind = .dismiss
+        default: return nil
+        }
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        func value(_ name: String) -> String? { items.first { $0.name == name }?.value }
+        guard let requestId = value("request"), AgentInboxMessage.isValidRequestId(requestId),
+              let agent = value("agent").flatMap(HookAgent.init(rawValue:))
         else { return nil }
-        self = message
+        let event = value("event").flatMap(HookEvent.init(rawValue:))
+        if kind == .update, event == nil { return nil }
+        let project = value("project").map { String($0.prefix(100)) }
+        self.init(kind: kind, requestId: requestId, agent: agent, event: event, project: project)
     }
 }
 
 // MARK: - Response (app to helper)
 
-/// What Parrot writes to a request's `responseFile`.
+/// What Parrot writes to `agent/responses/<requestId>.json`.
 struct AgentHookResponse: Codable, Equatable, Sendable {
     enum Action: String, Codable, Sendable {
         /// Stop: continue the agent with `text` as the next prompt.
@@ -621,8 +656,8 @@ struct AgentHookState: Codable, Equatable, Sendable {
 ///
 /// The root defaults to `~/Library/Application Support/Parrot/` (the app's
 /// `AppPaths` root); `PARROT_AGENT_ROOT` overrides it for tests. Session
-/// markers live in a per-user temp folder, `PARROT_AGENT_CONTROL_DIR`
-/// overrides it.
+/// markers live in the per-user temp folder, `PARROT_AGENT_CONTROL_DIR`
+/// overrides it. Every folder is checked with `secureDirectory` before use.
 struct AgentHookPaths: Equatable, Sendable {
     var root: URL
     var controlDir: URL
@@ -646,9 +681,17 @@ struct AgentHookPaths: Equatable, Sendable {
         return AgentHookPaths(root: root, controlDir: control)
     }
 
-    /// `/tmp/parrot-agent-<uid>/`: per user, so nobody else can plant markers.
+    /// `parrot-agent/` in the per-user temp folder. Read from the system
+    /// (`_CS_DARWIN_USER_TEMP_DIR`, what `temporaryDirectory` normally
+    /// returns) rather than `TMPDIR`, so the app and a hook started from any
+    /// shell agree on it.
     static var defaultControlDir: URL {
-        URL(fileURLWithPath: "/tmp/parrot-agent-\(getuid())", isDirectory: true)
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let length = confstr(_CS_DARWIN_USER_TEMP_DIR, &buffer, buffer.count)
+        let temp = length > 0 && length <= buffer.count
+            ? URL(fileURLWithPath: String(cString: buffer), isDirectory: true)
+            : FileManager.default.temporaryDirectory
+        return temp.appendingPathComponent("parrot-agent", isDirectory: true)
     }
 
     var agentDir: URL { root.appendingPathComponent("agent", isDirectory: true) }
@@ -657,8 +700,22 @@ struct AgentHookPaths: Equatable, Sendable {
     var messages: URL { agentDir.appendingPathComponent("messages", isDirectory: true) }
     var stateFile: URL { agentDir.appendingPathComponent("state.json") }
 
-    func responseFile(requestId: String) -> URL {
-        responses.appendingPathComponent(Self.safeName(requestId) + ".json")
+    /// `responses/<requestId>.json`, or nil when the id is not valid or the
+    /// path would leave the responses folder.
+    func responseFile(requestId: String) -> URL? {
+        Self.file(named: requestId, extension: "json", in: responses)
+    }
+
+    /// `messages/<requestId>.md`, with the same checks.
+    func messageFile(requestId: String) -> URL? {
+        Self.file(named: requestId, extension: "md", in: messages)
+    }
+
+    private static func file(named requestId: String, extension ext: String, in directory: URL) -> URL? {
+        guard AgentInboxMessage.isValidRequestId(requestId) else { return nil }
+        let file = directory.appendingPathComponent("\(requestId).\(ext)").standardizedFileURL
+        guard file.deletingLastPathComponent().path == directory.standardizedFileURL.path else { return nil }
+        return file
     }
 
     /// Present: the helper exits at once for this session.
@@ -671,15 +728,6 @@ struct AgentHookPaths: Equatable, Sendable {
         controlDir.appendingPathComponent("bypass-" + Self.safeName(sessionId))
     }
 
-    /// True when the control folder exists and belongs to this user. Markers
-    /// in a folder someone else owns are ignored.
-    var controlDirIsTrusted: Bool {
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: controlDir.path),
-              let owner = attributes[.ownerAccountID] as? NSNumber
-        else { return false }
-        return owner.uint32Value == getuid()
-    }
-
     /// Letters, digits, dot, dash and underscore; anything else becomes `_`.
     static func safeName(_ id: String) -> String {
         let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
@@ -687,18 +735,83 @@ struct AgentHookPaths: Equatable, Sendable {
         return mapped.isEmpty || mapped.allSatisfy({ $0 == "." }) ? "_" : mapped
     }
 
-    /// Writes `data` next to `url` under a hidden name, then renames it into
-    /// place, so a reader never sees half a file.
-    static func writeAtomically(_ data: Data, to url: URL) throws {
-        let directory = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let temp = directory.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
-        try data.write(to: temp)
-        if rename(temp.path, url.path) != 0 {
-            let code = errno
-            try? FileManager.default.removeItem(at: temp)
-            throw CocoaError(.fileWriteUnknown, userInfo: [NSUnderlyingErrorKey: POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)])
+    // MARK: Folder and File Safety
+
+    enum DirectoryCheck: Equatable, Sendable {
+        case missing
+        /// A real folder owned by this user, mode 0700.
+        case secure
+        /// A symlink, not a folder, owned by someone else, or unfixable.
+        case insecure
+    }
+
+    /// Checks `directory` without following a symlink: it must be a real
+    /// folder owned by this user. Group and other access on a folder the
+    /// user owns is removed (0700). With `create`, a missing folder is made
+    /// 0700 (its parent must exist).
+    @discardableResult
+    static func secureDirectory(_ directory: URL, create: Bool) -> DirectoryCheck {
+        let path = directory.path
+        var info = stat()
+        if lstat(path, &info) != 0 {
+            guard errno == ENOENT else { return .insecure }
+            guard create else { return .missing }
+            if mkdir(path, 0o700) != 0, errno != EEXIST { return .insecure }
+            guard lstat(path, &info) == 0 else { return .insecure }
         }
+        guard (info.st_mode & S_IFMT) == S_IFDIR, info.st_uid == getuid() else { return .insecure }
+        if info.st_mode & 0o077 != 0 {
+            guard chmod(path, 0o700) == 0 else { return .insecure }
+        }
+        return .secure
+    }
+
+    /// Writes `data` to a hidden temp file created with `permissions`
+    /// (0600 unless given), then renames it into place, so a reader never
+    /// sees half a file and nobody else can read it. A missing parent folder
+    /// is created 0700.
+    static func writeAtomically(_ data: Data, to url: URL, permissions: mode_t = 0o600) throws {
+        func failure(_ code: Int32) -> Error {
+            CocoaError(.fileWriteUnknown, userInfo: [NSUnderlyingErrorKey: POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)])
+        }
+        let directory = url.deletingLastPathComponent()
+        if !FileManager.default.fileExists(atPath: directory.path) {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]
+            )
+        }
+        let temp = directory.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
+        let descriptor = open(temp.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, permissions)
+        guard descriptor >= 0 else { throw failure(errno) }
+        var code: Int32 = 0
+        data.withUnsafeBytes { buffer in
+            guard let base = buffer.baseAddress else { return }
+            var offset = 0
+            while offset < buffer.count {
+                let written = write(descriptor, base + offset, buffer.count - offset)
+                if written < 0 {
+                    if errno == EINTR { continue }
+                    code = errno
+                    return
+                }
+                offset += written
+            }
+        }
+        // The umask may have cleared bits the caller asked for.
+        if code == 0, fchmod(descriptor, permissions) != 0 { code = errno }
+        close(descriptor)
+        if code == 0, rename(temp.path, url.path) != 0 { code = errno }
+        if code != 0 {
+            unlink(temp.path)
+            throw failure(code)
+        }
+    }
+
+    /// True for a regular file (not a symlink) owned by this user.
+    static func isPrivateFile(_ url: URL) -> Bool {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { return false }
+        return (info.st_mode & S_IFMT) == S_IFREG && info.st_uid == getuid()
     }
 }
 

@@ -22,10 +22,14 @@ struct AgentPanelView: View {
                     if bridge.elicitation != nil {
                         AgentElicitationView(bridge: bridge)
                     } else {
-                        replyArea(session)
+                        // No question data (a link request): answer there.
+                        HStack {
+                            Spacer()
+                            Button("Answer in Terminal") { Task { await bridge.dismissCurrent() } }
+                        }
                     }
                 case .plan:
-                    planArea
+                    planArea(session)
                 }
                 footer(session)
             } else {
@@ -67,7 +71,7 @@ struct AgentPanelView: View {
         }
     }
 
-    private var planArea: some View {
+    private func planArea(_ session: AgentSession) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             AgentDraftEditor(text: $bridge.draft, placeholder: "Feedback to keep planning (optional)")
             HStack {
@@ -75,8 +79,9 @@ struct AgentPanelView: View {
                 Button("Keep Planning") {
                     Task { await bridge.respond(.rejectPlan, text: bridge.draft) }
                 }
-                Button("Approve Plan") { Task { await bridge.respond(.approvePlan) } }
-                    .keyboardShortcut(.return, modifiers: .command)
+                // A link request is approved by a click only, no shortcut.
+                Button("Approve Plan") { Task { await bridge.respond(.approvePlan, explicit: true) } }
+                    .keyboardShortcut(session.trusted ? KeyboardShortcut(.return, modifiers: .command) : nil)
                     .buttonStyle(.borderedProminent)
             }
         }
@@ -98,6 +103,10 @@ struct AgentPanelView: View {
                     Button("Disable") { Task { await bridge.disableCurrentSession() } }
                 }
             }
+        } else if !session.trusted {
+            Label("Came by link, so details are hidden and choices are limited.", systemImage: "link")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         } else {
             HStack(spacing: 10) {
                 if bridge.isBypassed(session.sessionId) {
@@ -247,7 +256,8 @@ struct AgentPermissionView: View {
     var body: some View {
         let permission = session.permission
         VStack(alignment: .leading, spacing: 8) {
-            Text(permission?.summary ?? "Permission needed").font(.subheadline.weight(.semibold))
+            Text(permission?.summary ?? (session.trusted ? "Permission needed" : AgentSession.detailsUnavailable))
+                .font(.subheadline.weight(.semibold))
             if let details = permission?.details, !details.isEmpty {
                 ScrollView {
                     Text(details)
@@ -260,24 +270,31 @@ struct AgentPermissionView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary.opacity(0.6)))
             }
-            AgentDraftEditor(text: $bridge.draft, placeholder: "Say allow or deny, or explain a denial")
+            AgentDraftEditor(
+                text: $bridge.draft,
+                placeholder: session.trusted ? "Say allow or deny, or explain a denial" : "Explain a denial (optional)"
+            )
             HStack {
-                Menu("More") {
-                    if permission?.canUpdatePermissions ?? false {
-                        // No index: the helper saves the first allow rule it
-                        // was offered, never a mode change.
-                        Button("Always Allow") { Task { await bridge.respond(.allowAlways) } }
-                        Button("Allow for This Session") { Task { await bridge.respond(.allowSession) } }
+                // A link request never offers saved rules or bypass.
+                if session.trusted {
+                    Menu("More") {
+                        if permission?.canUpdatePermissions ?? false {
+                            // No index: the helper saves the first allow rule
+                            // it was offered, never a mode change.
+                            Button("Always Allow") { Task { await bridge.respond(.allowAlways) } }
+                            Button("Allow for This Session") { Task { await bridge.respond(.allowSession) } }
+                        }
+                        Button("Bypass Permissions for This Session") { Task { await bridge.respond(.bypass) } }
                     }
-                    Button("Bypass Permissions for This Session") { Task { await bridge.respond(.bypass) } }
+                    .fixedSize()
                 }
-                .fixedSize()
                 Spacer()
                 Button("Deny") {
                     Task { await bridge.respond(.deny, text: bridge.draft) }
                 }
-                Button("Allow") { Task { await bridge.respond(.allow) } }
-                    .keyboardShortcut(.return, modifiers: .command)
+                // A link request is allowed by a click only, no shortcut.
+                Button("Allow") { Task { await bridge.respond(.allow, explicit: true) } }
+                    .keyboardShortcut(session.trusted ? KeyboardShortcut(.return, modifiers: .command) : nil)
                     .buttonStyle(.borderedProminent)
             }
         }

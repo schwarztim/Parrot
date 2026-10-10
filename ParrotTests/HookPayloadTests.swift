@@ -146,7 +146,7 @@ final class HookPayloadTests: XCTestCase {
 
         let message = AgentInboxMessage.update(
             agent: .claude, event: .stop, input: input, requestId: "r1",
-            responseFile: "/tmp/r1.json", hookPid: 42, branch: "main"
+            hookPid: 42, branch: "main"
         )
         XCTAssertEqual(message.kind, .update)
         XCTAssertEqual(message.project, "my-project")
@@ -161,7 +161,7 @@ final class HookPayloadTests: XCTestCase {
         XCTAssertEqual(input.event(for: .claude), .permission)
         let message = AgentInboxMessage.update(
             agent: .claude, event: .permission, input: input, requestId: "r2",
-            responseFile: "/tmp/r2.json", hookPid: 1, branch: nil
+            hookPid: 1, branch: nil
         )
         let permission = try XCTUnwrap(message.permission)
         XCTAssertEqual(permission.toolName, "Bash")
@@ -186,7 +186,7 @@ final class HookPayloadTests: XCTestCase {
         XCTAssertEqual(plan.event(for: .claude), .plan)
         let message = AgentInboxMessage.update(
             agent: .claude, event: .plan, input: plan, requestId: "r3",
-            responseFile: "/tmp/r3.json", hookPid: 1, branch: nil
+            hookPid: 1, branch: nil
         )
         XCTAssertEqual(message.message, "## Refactor auth\n1. Extract the session type")
         XCTAssertEqual(message.permissionMode, "plan")
@@ -204,7 +204,7 @@ final class HookPayloadTests: XCTestCase {
         XCTAssertNil(stop.lastAssistantMessage)
         let message = AgentInboxMessage.update(
             agent: .codex, event: .stop, input: stop, requestId: "r4",
-            responseFile: "/tmp/r4.json", hookPid: 1, branch: nil
+            hookPid: 1, branch: nil
         )
         XCTAssertEqual(message.summary, "Finished its turn")
         XCTAssertNil(message.message)
@@ -346,21 +346,122 @@ final class HookPayloadTests: XCTestCase {
 
     // MARK: - Links, Phrases, Paths
 
-    func testDeepLinkCarriesTheMessage() throws {
+    static let requestId = "6F9619FF-8B86-D011-B42D-00C04FC964FF"
+
+    func testDeepLinkCarriesOnlyIdsAndNames() throws {
         let input = try decode(Self.claudePermission)
-        let message = AgentInboxMessage.update(
-            agent: .claude, event: .permission, input: input, requestId: "r5",
-            responseFile: "/tmp/r5.json", hookPid: 7, branch: "main"
+        var message = AgentInboxMessage.update(
+            agent: .claude, event: .permission, input: input, requestId: Self.requestId,
+            hookPid: 7, branch: "main"
         )
-        let url = try XCTUnwrap(message.deepLink)
+        message.message = "secret source code and API_KEY=sk-test-123"
+        let url = try XCTUnwrap(AgentDeepLink(message: message).url)
         XCTAssertEqual(url.scheme, "parrot")
         XCTAssertEqual(url.host(), "agent-update")
         XCTAssertEqual(URLRoute(url), .agent(url))
-        XCTAssertEqual(AgentInboxMessage(deepLink: url), message)
 
-        let dismiss = AgentInboxMessage.dismiss(agent: .codex, sessionId: "s", requestId: "r6", hookPid: nil)
-        XCTAssertEqual(dismiss.deepLink?.host(), "agent-dismiss")
-        XCTAssertNil(AgentInboxMessage(deepLink: URL(string: "parrot://agent-update?payload=%%%")!))
+        // Exactly the request id, agent, event and project name; nothing from
+        // the message, the tool input, the session or any path.
+        let names = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.map(\.name).sorted()
+        XCTAssertEqual(names, ["agent", "event", "project", "request"])
+        for secret in ["rm -rf", "node_modules", "secret", "API_KEY", "abc123", "/Users/example", "main"] {
+            XCTAssertFalse(url.absoluteString.contains(secret), "link leaks \(secret)")
+        }
+
+        let link = try XCTUnwrap(AgentDeepLink(url: url))
+        XCTAssertEqual(link, AgentDeepLink(kind: .update, requestId: Self.requestId, agent: .claude, event: .permission, project: "my-project"))
+
+        let dismiss = AgentDeepLink(message: .dismiss(agent: .codex, sessionId: "s", requestId: Self.requestId, hookPid: nil))
+        XCTAssertEqual(dismiss.url?.host(), "agent-dismiss")
+        XCTAssertEqual(AgentDeepLink(url: try XCTUnwrap(dismiss.url))?.kind, .dismiss)
+    }
+
+    func testDeepLinkRejectsBadRequestsAndIgnoresPaths() throws {
+        let bad = [
+            "parrot://agent-update?request=../../etc/passwd&agent=claude&event=stop",
+            "parrot://agent-update?request=short&agent=claude&event=stop",
+            "parrot://agent-update?request=\(String(repeating: "a", count: 65))&agent=claude&event=stop",
+            "parrot://agent-update?request=\(Self.requestId)&agent=grok&event=stop",
+            "parrot://agent-update?request=\(Self.requestId)&agent=claude",
+            "parrot://agent-wake?request=\(Self.requestId)&agent=claude&event=stop",
+        ]
+        for text in bad {
+            XCTAssertNil(AgentDeepLink(url: try XCTUnwrap(URL(string: text))), text)
+        }
+        // Extra items such as a response path are ignored, never used.
+        let crafted = try XCTUnwrap(URL(string: "parrot://agent-update?request=\(Self.requestId)&agent=codex&event=stop&responseFile=/tmp/evil.json&payload=xyz"))
+        XCTAssertEqual(AgentDeepLink(url: crafted), AgentDeepLink(kind: .update, requestId: Self.requestId, agent: .codex, event: .stop, project: nil))
+    }
+
+    func testRequestIdsAndDerivedPaths() {
+        XCTAssertTrue(AgentInboxMessage.isValidRequestId(UUID().uuidString))
+        XCTAssertTrue(AgentInboxMessage.isValidRequestId("abcd1234"))
+        XCTAssertFalse(AgentInboxMessage.isValidRequestId("abc123"))
+        XCTAssertFalse(AgentInboxMessage.isValidRequestId("../../x/../y"))
+        XCTAssertFalse(AgentInboxMessage.isValidRequestId("abcd_1234"))
+        XCTAssertFalse(AgentInboxMessage.isValidRequestId("abcd1234é"))
+        XCTAssertFalse(AgentInboxMessage.isValidRequestId(String(repeating: "a", count: 65)))
+
+        let paths = AgentHookPaths(root: URL(fileURLWithPath: "/r"), controlDir: URL(fileURLWithPath: "/c"))
+        XCTAssertEqual(paths.responseFile(requestId: Self.requestId)?.path, "/r/agent/responses/\(Self.requestId).json")
+        XCTAssertEqual(paths.messageFile(requestId: Self.requestId)?.path, "/r/agent/messages/\(Self.requestId).md")
+        XCTAssertNil(paths.responseFile(requestId: "../../../tmp/evil"))
+        XCTAssertNil(paths.responseFile(requestId: ""))
+    }
+
+    func testFilesAre0600AndFoldersAre0700() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("hook-perm-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("agent/inbox/x.json")
+        try AgentHookPaths.writeAtomically(Data("{}".utf8), to: file)
+        XCTAssertEqual(try mode(file), 0o600)
+        XCTAssertEqual(try mode(file.deletingLastPathComponent()), 0o700)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: file.deletingLastPathComponent().path), ["x.json"], "no temp file left")
+        try AgentHookPaths.writeAtomically(Data("{\"a\":1}".utf8), to: file)
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "{\"a\":1}")
+        XCTAssertEqual(try mode(file), 0o600)
+        XCTAssertTrue(AgentHookPaths.isPrivateFile(file))
+
+        let shared = root.appendingPathComponent("shared.json")
+        try AgentHookPaths.writeAtomically(Data(), to: shared, permissions: 0o644)
+        XCTAssertEqual(try mode(shared), 0o644)
+    }
+
+    func testSecureDirectoryChecks() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("hook-dir-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let fresh = root.appendingPathComponent("fresh")
+        XCTAssertEqual(AgentHookPaths.secureDirectory(fresh, create: false), .missing)
+        XCTAssertEqual(AgentHookPaths.secureDirectory(fresh, create: true), .secure)
+        XCTAssertEqual(try mode(fresh), 0o700)
+
+        let open = root.appendingPathComponent("open")
+        try FileManager.default.createDirectory(at: open, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o777])
+        XCTAssertEqual(AgentHookPaths.secureDirectory(open, create: false), .secure)
+        XCTAssertEqual(try mode(open), 0o700, "group and other access removed")
+
+        let link = root.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: fresh)
+        XCTAssertEqual(AgentHookPaths.secureDirectory(link, create: true), .insecure)
+
+        let file = root.appendingPathComponent("file")
+        FileManager.default.createFile(atPath: file.path, contents: Data())
+        XCTAssertEqual(AgentHookPaths.secureDirectory(file, create: true), .insecure)
+        XCTAssertFalse(AgentHookPaths.isPrivateFile(link))
+    }
+
+    func testDefaultControlDirIsPerUserTemp() {
+        let control = AgentHookPaths.defaultControlDir
+        XCTAssertEqual(control.lastPathComponent, "parrot-agent")
+        XCTAssertFalse(control.path.hasPrefix("/tmp/"))
+        XCTAssertTrue(control.path.contains("/T/") || control.path.hasPrefix(FileManager.default.temporaryDirectory.path))
+    }
+
+    private func mode(_ url: URL) throws -> Int {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes[.posixPermissions] as? NSNumber)?.intValue ?? -1
     }
 
     func testEnablePhrases() {
@@ -382,7 +483,7 @@ final class HookPayloadTests: XCTestCase {
         XCTAssertEqual(paths.bypassMarker(sessionId: "s1").path, "/c/bypass-s1")
         XCTAssertEqual(paths.inbox.path, "/r/agent/inbox")
         XCTAssertEqual(paths.inbox, AppPaths(root: URL(fileURLWithPath: "/r")).agentInbox)
-        XCTAssertEqual(paths.responseFile(requestId: "x").path, "/r/agent/responses/x.json")
+        XCTAssertNil(paths.responseFile(requestId: "x"), "too short to be a request id")
     }
 
     func testEnvironmentOverridesRoot() {

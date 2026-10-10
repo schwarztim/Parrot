@@ -30,7 +30,10 @@ struct AgentSession: Codable, Equatable, Identifiable, Sendable {
     var summary: String
     /// The agent's last message or plan, Markdown.
     var message: String
-    var responseFile: String?
+    /// True when the request came through the inbox (a folder only the
+    /// user can write). False for a `parrot://` link, which anyone can
+    /// open: no details, and no bypass, always allow or spoken allow.
+    var trusted: Bool
     var cwd: String?
     var project: String?
     var branch: String?
@@ -41,8 +44,12 @@ struct AgentSession: Codable, Equatable, Identifiable, Sendable {
     var questions: [HookQuestion]?
     var receivedAt: Date
 
+    /// A request from the inbox. Nil for a dismiss, a missing event or an
+    /// invalid request id.
     init?(message update: AgentInboxMessage, fullText: String? = nil) {
-        guard update.kind == .update, let event = update.event else { return nil }
+        guard update.kind == .update, let event = update.event,
+              AgentInboxMessage.isValidRequestId(update.requestId)
+        else { return nil }
         agent = update.agent
         sessionId = update.sessionId
         requestId = update.requestId
@@ -50,7 +57,7 @@ struct AgentSession: Codable, Equatable, Identifiable, Sendable {
         status = AgentSession.status(for: event)
         summary = update.summary ?? ""
         message = fullText ?? update.message ?? ""
-        responseFile = update.responseFile
+        trusted = true
         cwd = update.cwd
         project = update.project
         branch = update.branch
@@ -61,6 +68,27 @@ struct AgentSession: Codable, Equatable, Identifiable, Sendable {
         questions = update.questions
         receivedAt = Date(timeIntervalSince1970: update.createdAt)
     }
+
+    /// Text shown for a request that came by link.
+    static let detailsUnavailable = "Details unavailable. Open the terminal to see what the agent needs."
+
+    /// A request that came by `parrot://` link: untrusted, details hidden.
+    /// Keyed by its request id so it can never replace an inbox session.
+    init?(link: AgentDeepLink, receivedAt: Date = Date()) {
+        guard link.kind == .update, let event = link.event else { return nil }
+        agent = link.agent
+        sessionId = Self.linkSessionId(link.requestId)
+        requestId = link.requestId
+        self.event = event
+        status = AgentSession.status(for: event)
+        summary = Self.detailsUnavailable
+        message = ""
+        trusted = false
+        project = link.project
+        self.receivedAt = receivedAt
+    }
+
+    static func linkSessionId(_ requestId: String) -> String { "link-" + requestId }
 
     static func status(for event: HookEvent) -> AgentStatus {
         switch event {
@@ -126,31 +154,54 @@ final class AgentSessionStore {
 
     // MARK: Changes
 
+    /// Applies a message from the inbox (trusted).
     @discardableResult
     func apply(_ message: AgentInboxMessage, fullText: String? = nil) -> Change {
         switch message.kind {
         case .update:
             guard let session = AgentSession(message: message, fullText: fullText) else { return .ignored }
-            if let index = sessions.firstIndex(where: { $0.sessionId == session.sessionId }) {
-                sessions[index] = session
-                save()
-                return .replaced
-            }
-            sessions.append(session)
-            save()
-            return sessions.count == 1 ? .shown : .queued
+            return insert(session)
         case .dismiss:
             // An empty request id means "anything for this session" (the user
             // typed in the terminal). Otherwise only that exact request goes,
             // so a late dismiss never removes a newer request.
             let before = sessions.count
             sessions.removeAll {
-                $0.sessionId == message.sessionId && (message.requestId.isEmpty || $0.requestId == message.requestId)
+                $0.trusted && $0.sessionId == message.sessionId
+                    && (message.requestId.isEmpty || $0.requestId == message.requestId)
             }
             guard sessions.count != before else { return .ignored }
             save()
             return .removed
         }
+    }
+
+    /// Applies a `parrot://` link (untrusted). It only ever adds or removes
+    /// link sessions; inbox sessions are out of its reach.
+    @discardableResult
+    func apply(link: AgentDeepLink) -> Change {
+        switch link.kind {
+        case .update:
+            guard let session = AgentSession(link: link) else { return .ignored }
+            return insert(session)
+        case .dismiss:
+            let before = sessions.count
+            sessions.removeAll { !$0.trusted && $0.requestId == link.requestId }
+            guard sessions.count != before else { return .ignored }
+            save()
+            return .removed
+        }
+    }
+
+    private func insert(_ session: AgentSession) -> Change {
+        if let index = sessions.firstIndex(where: { $0.sessionId == session.sessionId }) {
+            sessions[index] = session
+            save()
+            return .replaced
+        }
+        sessions.append(session)
+        save()
+        return sessions.count == 1 ? .shown : .queued
     }
 
     func remove(requestId: String) {
@@ -171,11 +222,12 @@ final class AgentSessionStore {
     }
 
     /// Drops sessions whose hook helper has exited (it timed out, or the
-    /// user answered in the terminal) and returns them.
+    /// user answered in the terminal) and returns them. A session with no
+    /// helper id (a link request) expires `maxAge` seconds after it arrived.
     @discardableResult
-    func pruneDeadProcesses(isAlive: (Int32) -> Bool) -> [AgentSession] {
+    func pruneDeadProcesses(isAlive: (Int32) -> Bool, now: Date = Date(), maxAge: TimeInterval = 3600) -> [AgentSession] {
         let dead = sessions.filter { session in
-            guard let pid = session.hookPid else { return true }
+            guard let pid = session.hookPid else { return now.timeIntervalSince(session.receivedAt) > maxAge }
             return !isAlive(pid)
         }
         guard !dead.isEmpty else { return [] }

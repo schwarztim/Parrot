@@ -74,18 +74,30 @@ final class AgentBridge {
 
     /// Points the bridge at a root folder and loads the saved queue. `start`
     /// calls it; tests call it directly with temp folders.
+    ///
+    /// The agent folders are made 0700 and must be real folders owned by
+    /// the user; otherwise the bridge stays off (`hookPaths` nil) and
+    /// nothing is read or written there.
     func configure(root: URL, controlDir: URL, settings: AgentSettings?) {
-        let paths = AgentHookPaths(root: root, controlDir: controlDir)
-        hookPaths = paths
         self.settings = settings
+        let paths = AgentHookPaths(root: root, controlDir: controlDir)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let folders = [paths.agentDir, paths.inbox, paths.responses, paths.messages]
+        guard folders.allSatisfy({ AgentHookPaths.secureDirectory($0, create: true) == .secure }) else {
+            diagLog("[Parrot:Agent] Agent folder is not a private folder owned by this user; agent replies stay off")
+            hookPaths = nil
+            delivery = nil
+            store = AgentSessionStore()
+            resetPanelState()
+            return
+        }
+        hookPaths = paths
         store = AgentSessionStore(fileURL: paths.agentDir.appendingPathComponent("sessions.json"))
         store.load(isAlive: isProcessAlive)
         delivery = AgentDeliveryQueue(
             responsesDirectory: paths.responses,
             fileURL: paths.agentDir.appendingPathComponent("message-queue.json")
         )
-        try? FileManager.default.createDirectory(at: paths.inbox, withIntermediateDirectories: true)
-        try? FileManager.default.createDirectory(at: paths.responses, withIntermediateDirectories: true)
         writeHookState()
         resetPanelState()
     }
@@ -103,8 +115,9 @@ final class AgentBridge {
     /// An agent is waiting on the user.
     var isWaiting: Bool { isEnabled && store.current != nil }
 
-    /// A dictation now would go to the agent instead of being pasted.
-    var isAcceptingDictation: Bool { isWaiting && panelVisible }
+    /// A dictation now would go to the agent instead of being pasted. Never
+    /// for a link request: a page opening a link must not capture speech.
+    var isAcceptingDictation: Bool { isWaiting && panelVisible && store.current?.trusted == true }
 
     func isBypassed(_ sessionId: String) -> Bool { store.bypassed.contains(sessionId) }
 
@@ -122,19 +135,20 @@ final class AgentBridge {
     // MARK: - URLs
 
     /// Handles a `parrot://agent-*` URL forwarded by URLRouter.
+    ///
+    /// Anyone can open such a link, so an update becomes an untrusted
+    /// session: shown with "details unavailable", answered only into
+    /// `responses/<requestId>.json`, and never offered bypass, always allow
+    /// or a spoken allow. A malformed link is dropped.
     func handle(url: URL) {
         let host = url.host()?.lowercased() ?? ""
         diagLog("[Parrot:Agent] URL \(host)")
         switch host {
         case "agent-update", "agent-dismiss":
-            if let message = AgentInboxMessage(deepLink: url) {
-                ingest(message)
-            } else if host == "agent-dismiss",
-                      let session = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-                        .queryItems?.first(where: { $0.name == "session" })?.value {
-                store.remove(sessionId: session)
-                sessionsChanged()
-            }
+            guard isEnabled, hookPaths != nil, let link = AgentDeepLink(url: url) else { return }
+            let change = store.apply(link: link)
+            diagLog("[Parrot:Agent] link \(link.agent.rawValue) \(link.kind.rawValue) \(link.event?.rawValue ?? "") -> \(change)")
+            sessionsChanged()
         case "agent-wake", "agent-show":
             showPanel(activate: true)
         default:
@@ -153,37 +167,34 @@ final class AgentBridge {
             .filter { $0.pathExtension == "json" && !$0.lastPathComponent.hasPrefix(".") }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         for file in ready.prefix(200) {
-            let data = try? Data(contentsOf: file)
+            // Only regular files this user owns; a symlink is removed unread.
+            let data = AgentHookPaths.isPrivateFile(file) ? try? Data(contentsOf: file) : nil
             try? FileManager.default.removeItem(at: file)
             guard let data, let message = try? JSONDecoder().decode(AgentInboxMessage.self, from: data) else { continue }
             ingest(message)
         }
     }
 
-    /// Applies one message from the helper.
-    func ingest(_ incoming: AgentInboxMessage) {
+    /// Applies one message from the helper's inbox (trusted).
+    func ingest(_ message: AgentInboxMessage) {
         guard isEnabled, let paths = hookPaths else { return }
-        var message = incoming
-        // Only answer into Parrot's own responses folder.
-        if let file = message.responseFile,
-           URL(fileURLWithPath: file).standardizedFileURL.deletingLastPathComponent().path != paths.responses.standardizedFileURL.path {
-            message.responseFile = nil
-        }
+        // A full message too long to inline: read from the path derived
+        // from the request id (never from the message), then delete it.
         var fullText: String?
-        if let file = message.messageFile {
-            let url = URL(fileURLWithPath: file).standardizedFileURL
-            if url.deletingLastPathComponent().path == paths.messages.standardizedFileURL.path {
-                fullText = try? String(contentsOf: url, encoding: .utf8)
-                try? FileManager.default.removeItem(at: url)
+        if message.messageInFile == true, let file = paths.messageFile(requestId: message.requestId) {
+            if AgentHookPaths.isPrivateFile(file) {
+                fullText = try? String(contentsOf: file, encoding: .utf8)
             }
+            try? FileManager.default.removeItem(at: file)
         }
+        let change = store.apply(message, fullText: fullText)
+        // Kinds and names only: messages can hold code and secrets.
+        diagLog("[Parrot:Agent] \(message.agent.rawValue) \(message.kind.rawValue) \(message.event?.rawValue ?? "") -> \(change)")
+        guard change != .ignored else { return }
+
         if message.kind == .update, message.permissionMode == "bypassPermissions", !store.bypassed.contains(message.sessionId) {
             setBypass(true, sessionId: message.sessionId)
         }
-
-        let change = store.apply(message, fullText: fullText)
-        diagLog("[Parrot:Agent] \(message.agent.rawValue) \(message.kind.rawValue) \(message.event?.rawValue ?? "") -> \(change)")
-
         // A bypassed session's permission request is approved at once.
         if message.kind == .update, message.event == .permission, store.bypassed.contains(message.sessionId) {
             let requestId = message.requestId
@@ -218,33 +229,56 @@ final class AgentBridge {
 
     // MARK: - Answering
 
+    /// Choices never honored for a request that came by link.
+    static let trustedOnlyActions: Set<AgentHookResponse.Action> = [.bypass, .allowAlways, .allowSession]
+    /// Choices a link request takes only from an explicit click.
+    static let clickOnlyActions: Set<AgentHookResponse.Action> = [.allow, .approvePlan]
+
+    /// Whether `action` may be sent for `session` (`explicit`: the user
+    /// clicked the button for it).
+    static func allows(_ action: AgentHookResponse.Action, for session: AgentSession, explicit: Bool) -> Bool {
+        guard !session.trusted else { return true }
+        if trustedOnlyActions.contains(action) { return false }
+        if clickOnlyActions.contains(action) { return explicit }
+        return true
+    }
+
     /// Sends `action` for the shown session (or `requestId`), then drops
-    /// that session and shows the next. Returns nil when the session is gone.
+    /// that session and shows the next. Returns nil when the session is
+    /// gone, `.refused` (and keeps the session) when a link request may not
+    /// take this choice. The answer only ever goes to
+    /// `responses/<requestId>.json`, derived here from a validated id.
     @discardableResult
     func respond(
         _ action: AgentHookResponse.Action,
         text: String? = nil,
         answers: [String: [String]]? = nil,
         suggestionIndex: Int? = nil,
-        requestId: String? = nil
+        requestId: String? = nil,
+        explicit: Bool = false
     ) async -> AgentDeliveryQueue.Outcome? {
         guard let session = requestId.map({ store.session(requestId: $0) }) ?? store.current,
-              let delivery
+              let delivery, let paths = hookPaths
         else { return nil }
+        guard Self.allows(action, for: session, explicit: explicit) else {
+            diagLog("[Parrot:Agent] Refused \(action.rawValue) for a request that came by link")
+            return .refused
+        }
         store.setStatus(.sending, requestId: session.requestId)
         let response = AgentHookResponse(
             requestId: session.requestId, action: action, text: text,
             answers: answers, suggestionIndex: suggestionIndex
         )
-        // A helper that has exited reads nothing: go straight to the fallback.
-        let alive = session.hookPid.map(isProcessAlive) ?? false
+        // A helper that has exited reads nothing: go straight to the
+        // fallback. A link request has no helper id; its file is written.
+        let alive = session.hookPid.map(isProcessAlive) ?? !session.trusted
         let fallback: String? = switch action {
         case .reply, .deny, .rejectPlan: text
         case .answer: answers.map { Self.answerText($0) }
         default: nil
         }
         let outcome = await delivery.send(
-            response, to: alive ? session.responseFile : nil,
+            response, to: alive ? paths.responseFile(requestId: session.requestId) : nil,
             fallbackText: fallback, agentName: session.agentName
         )
         if action == .bypass { setBypass(true, sessionId: session.sessionId) }
@@ -348,6 +382,7 @@ final class AgentBridge {
         case .permission:
             let said = AgentElicitation.normalize(trimmed)
             if Self.allowWords.contains(said) {
+                // A link request needs a click; speech is refused there.
                 await respond(.allow)
             } else if Self.denyWords.contains(said) {
                 await respond(.deny)
@@ -398,11 +433,31 @@ final class AgentBridge {
     }
 
     /// Rescans the inbox and drops sessions whose helper has exited.
-    func tick() {
+    func tick(now: Date = Date()) {
         scanInbox()
-        let dead = store.pruneDeadProcesses(isAlive: isProcessAlive)
+        // Link requests have no helper to watch: they expire with the wait.
+        let maxAge = settings?.clampedResponseTimeout ?? 300
+        let dead = store.pruneDeadProcesses(isAlive: isProcessAlive, now: now, maxAge: maxAge)
         for session in dead { delivery?.cancel(requestId: session.requestId) }
         if !dead.isEmpty { sessionsChanged() }
+        sweepOrphans(now: now)
+    }
+
+    /// Deletes response and message files nobody picked up (a helper that
+    /// was killed, or an answer to a link nobody waits on) once they are
+    /// older than the longest possible wait.
+    func sweepOrphans(now: Date = Date()) {
+        guard let paths = hookPaths else { return }
+        let limit = AgentSettings.timeoutRange.upperBound + 60
+        for folder in [paths.responses, paths.messages] {
+            let files = (try? FileManager.default.contentsOfDirectory(
+                at: folder, includingPropertiesForKeys: [.contentModificationDateKey]
+            )) ?? []
+            for file in files {
+                let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? now
+                if now.timeIntervalSince(modified) > limit { try? FileManager.default.removeItem(at: file) }
+            }
+        }
     }
 
     // MARK: - Settings and Shared State
@@ -442,13 +497,15 @@ final class AgentBridge {
         try? AgentHookPaths.writeAtomically(data, to: paths.stateFile)
     }
 
+    /// Creates or removes a session marker. The control folder must pass
+    /// the same 0700, owner and no-symlink check the helper makes.
     private func writeMarker(_ url: URL, present: Bool) {
+        guard AgentHookPaths.secureDirectory(url.deletingLastPathComponent(), create: true) == .secure else {
+            diagLog("[Parrot:Agent] Control folder is not private; marker not written")
+            return
+        }
         if present {
-            try? FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            FileManager.default.createFile(atPath: url.path, contents: Data())
+            try? AgentHookPaths.writeAtomically(Data(), to: url)
         } else {
             try? FileManager.default.removeItem(at: url)
         }

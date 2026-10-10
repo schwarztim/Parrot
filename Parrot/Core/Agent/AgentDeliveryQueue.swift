@@ -24,6 +24,9 @@ final class AgentDeliveryQueue {
         case delivered
         case copiedToClipboard
         case failed
+        /// Not sent: the choice is not allowed for this request (see
+        /// `AgentBridge.respond`).
+        case refused
     }
 
     private(set) var pending: [Entry] = []
@@ -51,13 +54,13 @@ final class AgentDeliveryQueue {
         load()
     }
 
-    /// Delivers `response` to `responseFile`. When that is impossible,
-    /// `fallbackText` (a reply the user typed or dictated) goes to the
-    /// clipboard and the user is told.
+    /// Delivers `response` to `responseFile` (0600). When that is
+    /// impossible, `fallbackText` (a reply the user typed or dictated) goes
+    /// to the clipboard and the user is told.
     @discardableResult
-    func send(_ response: AgentHookResponse, to responseFile: String?, fallbackText: String?, agentName: String) async -> Outcome {
+    func send(_ response: AgentHookResponse, to responseFile: URL?, fallbackText: String?, agentName: String) async -> Outcome {
         cancelled.remove(response.requestId)
-        guard let target = allowedTarget(responseFile) else {
+        guard let target = allowedTarget(responseFile, requestId: response.requestId) else {
             return fallBack(fallbackText, agentName: agentName)
         }
         let data: Data
@@ -99,10 +102,13 @@ final class AgentDeliveryQueue {
 
     // MARK: Helpers
 
-    private func allowedTarget(_ path: String?) -> URL? {
-        guard let path, !path.isEmpty else { return nil }
-        let url = URL(fileURLWithPath: path).standardizedFileURL
-        guard url.deletingLastPathComponent().path == responsesDirectory.path else { return nil }
+    /// `responses/<requestId>.json` and nothing else, checked again here.
+    private func allowedTarget(_ file: URL?, requestId: String) -> URL? {
+        guard let file, AgentInboxMessage.isValidRequestId(requestId) else { return nil }
+        let url = file.standardizedFileURL
+        guard url.deletingLastPathComponent().path == responsesDirectory.path,
+              url.lastPathComponent == "\(requestId).json"
+        else { return nil }
         return url
     }
 

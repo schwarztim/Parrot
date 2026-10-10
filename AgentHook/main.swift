@@ -8,6 +8,11 @@ import Foundation
 // Rule one: never break or stall the CLI. Every failure path and every wait
 // ends with exit code 0 and nothing on stdout, which both CLIs read as "no
 // decision", so their own terminal prompt takes over.
+//
+// Rule two: agent messages and tool inputs can hold source code and
+// secrets. Folders must be 0700, owned by the user and not symlinks (or the
+// helper exits); files are created 0600 and deleted once handled; the
+// fallback link carries only ids and names; nothing is logged.
 
 let usage = """
     usage: parrot-agent-hook <claude|codex>
@@ -23,7 +28,11 @@ let pid = getpid()
 /// Seconds between checks for the response file.
 let pollInterval: TimeInterval = 0.15
 
+/// Files this run created, removed on every exit after the request is out.
+var ownFiles: [URL] = []
+
 func finish(_ output: HookJSON? = nil) -> Never {
+    for file in ownFiles { unlink(file.path) }
     if let output {
         var data = HookDecision.encode(output)
         data.append(0x0A)
@@ -41,7 +50,15 @@ let stdinData = FileHandle.standardInput.readDataToEndOfFile()
 guard let input = try? JSONDecoder().decode(HookInput.self, from: stdinData) else { finish() }
 
 let paths = AgentHookPaths.resolve(environment: environment)
-let markersTrusted = paths.controlDirIsTrusted
+
+// Session markers: a control folder that is not ours means stop here.
+let controlCheck = AgentHookPaths.secureDirectory(paths.controlDir, create: false)
+if controlCheck == .insecure { finish() }
+let markersTrusted = controlCheck == .secure
+
+// Parrot creates the agent folder when the feature is set up; missing or
+// not ours, there is nobody to ask.
+guard AgentHookPaths.secureDirectory(paths.agentDir, create: false) == .secure else { finish() }
 
 func markerExists(_ url: URL) -> Bool {
     markersTrusted && FileManager.default.fileExists(atPath: url.path)
@@ -49,7 +66,9 @@ func markerExists(_ url: URL) -> Bool {
 
 /// The app's shared state, or nil when Parrot never turned the feature on.
 func loadState() -> AgentHookState? {
-    guard let data = try? Data(contentsOf: paths.stateFile) else { return nil }
+    guard AgentHookPaths.isPrivateFile(paths.stateFile),
+          let data = try? Data(contentsOf: paths.stateFile)
+    else { return nil }
     return try? JSONDecoder().decode(AgentHookState.self, from: data)
 }
 
@@ -59,24 +78,28 @@ func appIsListening(_ state: AgentHookState?) -> Bool {
     return agentHookProcessIsAlive(state.appPid)
 }
 
-/// Drops `message` into the inbox; false when that fails.
-func writeInbox(_ message: AgentInboxMessage) -> Bool {
+/// Drops `message` into the inbox (0600) and returns the file, or nil.
+func writeInbox(_ message: AgentInboxMessage) -> URL? {
+    guard AgentHookPaths.secureDirectory(paths.inbox, create: true) == .secure else { return nil }
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]
-    guard let data = try? encoder.encode(message) else { return false }
-    let name = "\(Int64(message.createdAt * 1000))-\(AgentHookPaths.safeName(message.requestId))-\(message.kind.rawValue).json"
+    guard let data = try? encoder.encode(message) else { return nil }
+    let request = message.requestId.isEmpty ? UUID().uuidString : message.requestId
+    let name = "\(Int64(message.createdAt * 1000))-\(AgentHookPaths.safeName(request))-\(message.kind.rawValue).json"
+    let file = paths.inbox.appendingPathComponent(name)
     do {
-        try AgentHookPaths.writeAtomically(data, to: paths.inbox.appendingPathComponent(name))
-        return true
+        try AgentHookPaths.writeAtomically(data, to: file)
+        return file
     } catch {
-        return false
+        return nil
     }
 }
 
-/// Hands `message` to Parrot through a `parrot://` link, the fallback when
-/// the inbox cannot be written. Waits at most five seconds for the opener.
+/// Tells Parrot through a `parrot://` link, the fallback when the inbox
+/// cannot be written. The link holds only ids and names. Waits at most five
+/// seconds for the opener.
 func openDeepLink(_ message: AgentInboxMessage) {
-    guard let url = message.deepLink else { return }
+    guard let url = AgentDeepLink(message: message).url else { return }
     let process = Process()
     process.executableURL = URL(fileURLWithPath: environment[AgentHookPaths.openerVariable] ?? "/usr/bin/open")
     process.arguments = [url.absoluteString]
@@ -90,10 +113,6 @@ func openDeepLink(_ message: AgentInboxMessage) {
     if process.isRunning { process.terminate() }
 }
 
-func deliver(_ message: AgentInboxMessage) {
-    if !writeInbox(message) { openDeepLink(message) }
-}
-
 // MARK: - UserPromptSubmit: re-enable phrase, and the user is back in the terminal
 
 if input.hookEventName == "UserPromptSubmit" {
@@ -103,9 +122,9 @@ if input.hookEventName == "UserPromptSubmit" {
         finish(HookDecision.blockPrompt(reason: "Parrot is on again for this session."))
     }
     // Typing in the terminal answers whatever Parrot was showing for this
-    // session, so take its card down.
+    // session, so take its card down. Inbox only: a link cannot carry it.
     if !markerExists(disabled), appIsListening(loadState()) {
-        deliver(.dismiss(agent: agent, sessionId: input.sessionId, requestId: "", hookPid: pid))
+        _ = writeInbox(.dismiss(agent: agent, sessionId: input.sessionId, requestId: "", hookPid: pid))
     }
     finish()
 }
@@ -126,23 +145,29 @@ if event == .permission, markerExists(paths.bypassMarker(sessionId: input.sessio
     ))
 }
 
+guard AgentHookPaths.secureDirectory(paths.responses, create: true) == .secure else { finish() }
+
 let requestId = UUID().uuidString
-let responseFile = paths.responseFile(requestId: requestId)
-try? FileManager.default.removeItem(at: responseFile)
+guard let responseFile = paths.responseFile(requestId: requestId) else { finish() }
+ownFiles.append(responseFile)
 
 var update = AgentInboxMessage.update(
-    agent: agent, event: event, input: input, requestId: requestId,
-    responseFile: responseFile.path, hookPid: pid,
+    agent: agent, event: event, input: input, requestId: requestId, hookPid: pid,
     branch: input.cwd.flatMap(AgentHookGit.branch(at:))
 )
-if let text = update.message, text.count > AgentInboxMessage.inlineLimit {
-    let file = paths.messages.appendingPathComponent(AgentHookPaths.safeName(requestId) + ".md")
-    if (try? AgentHookPaths.writeAtomically(Data(text.utf8), to: file)) != nil {
-        update.messageFile = file.path
-        update.message = String(text.prefix(AgentInboxMessage.inlineLimit))
-    }
+if let text = update.message, text.count > AgentInboxMessage.inlineLimit,
+   AgentHookPaths.secureDirectory(paths.messages, create: true) == .secure,
+   let file = paths.messageFile(requestId: requestId),
+   (try? AgentHookPaths.writeAtomically(Data(text.utf8), to: file)) != nil {
+    ownFiles.append(file)
+    update.messageInFile = true
+    update.message = String(text.prefix(AgentInboxMessage.inlineLimit))
 }
-deliver(update)
+if let file = writeInbox(update) {
+    ownFiles.append(file)
+} else {
+    openDeepLink(update)
+}
 
 // MARK: - Wait for the answer
 
@@ -152,14 +177,13 @@ var nextAppCheck = Date().addingTimeInterval(2)
 var unreadable = 0
 
 while Date() < deadline {
-    if let data = try? Data(contentsOf: responseFile) {
+    if AgentHookPaths.isPrivateFile(responseFile), let data = try? Data(contentsOf: responseFile) {
         if let response = try? JSONDecoder().decode(AgentHookResponse.self, from: data), response.requestId == requestId {
-            try? FileManager.default.removeItem(at: responseFile)
             finish(HookDecision.output(agent: agent, event: event, input: input, response: response))
         }
         unreadable += 1
         if unreadable > 20 {
-            try? FileManager.default.removeItem(at: responseFile)
+            unlink(responseFile.path)
             unreadable = 0
         }
     }
@@ -172,6 +196,6 @@ while Date() < deadline {
 }
 
 // No answer: take the card down and let the CLI's own prompt take over.
+// (`finish` also deletes this request's unread inbox and message files.)
 _ = writeInbox(.dismiss(agent: agent, sessionId: input.sessionId, requestId: requestId, hookPid: pid))
-try? FileManager.default.removeItem(at: responseFile)
 finish()
