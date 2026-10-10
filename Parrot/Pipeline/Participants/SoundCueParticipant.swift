@@ -1,4 +1,4 @@
-import AppKit
+import Foundation
 
 /// Start, stop and no-result sound cues (AUD).
 @MainActor
@@ -9,22 +9,20 @@ final class SoundCueParticipant: RecordingParticipant {
         self.services = services
     }
 
-    private var soundsEnabled: Bool {
-        services.settings?.audio.soundEffectsEnabled ?? true
-    }
-
     /// Lets the user know recording started.
     func didStart(_ session: DictationSession) {
-        if soundsEnabled {
-            NSSound(named: "Tink")?.play()
-        }
+        services.sounds.play(.start, settings: services.settings?.audio)
     }
 
     /// Lets the user know recording stopped. Plays after the mic closes so
     /// the cue is not captured.
     func willStop(_ session: DictationSession) {
-        if soundsEnabled {
-            NSSound(named: "Pop")?.play()
-        }
+        services.sounds.play(.stop, settings: services.settings?.audio)
+    }
+
+    /// A live recording that produced no text plays the no-result cue.
+    func didFinish(_ session: DictationSession) {
+        guard session.source == .live, let outcome = session.outcome else { return }
+        services.sounds.play(.finish(outcome), settings: services.settings?.audio)
     }
 }

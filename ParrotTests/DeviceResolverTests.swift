@@ -1,3 +1,4 @@
+import CoreAudio
 import XCTest
 
 @testable import Parrot
@@ -187,5 +188,224 @@ final class DeviceResolverTests: XCTestCase {
         XCTAssertEqual(DeviceResolver.migratedPin(stored: "99", devices: devices), .some(nil))
         XCTAssertNil(DeviceResolver.migratedPin(stored: "usb-mic", devices: devices))
         XCTAssertNil(DeviceResolver.migratedPin(stored: nil, devices: devices))
+    }
+}
+
+/// Fake Core Audio for the device service: no real device is read or changed.
+final class FakeAudioHardware: AudioHardware, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _devices: [AudioDevice]
+    private var _defaultID: AudioDeviceID?
+    private var _delay: TimeInterval = 0
+    private var _volumeCalls: [AudioDeviceID] = []
+
+    init(devices: [AudioDevice], defaultID: AudioDeviceID?) {
+        _devices = devices
+        _defaultID = defaultID
+    }
+
+    var devices: [AudioDevice] {
+        get { lock.withLock { _devices } }
+        set { lock.withLock { _devices = newValue } }
+    }
+
+    var defaultID: AudioDeviceID? {
+        get { lock.withLock { _defaultID } }
+        set { lock.withLock { _defaultID = newValue } }
+    }
+
+    /// Seconds each query takes, to exercise the timeout.
+    var delay: TimeInterval {
+        get { lock.withLock { _delay } }
+        set { lock.withLock { _delay = newValue } }
+    }
+
+    var volumeCalls: [AudioDeviceID] { lock.withLock { _volumeCalls } }
+
+    func inputDevices() -> [AudioDevice] {
+        let wait = delay
+        if wait > 0 { Thread.sleep(forTimeInterval: wait) }
+        return devices
+    }
+
+    func defaultInputDeviceID() -> AudioDeviceID? { defaultID }
+
+    func setInputVolume(_ volume: Float, device: AudioDeviceID) -> Bool {
+        lock.withLock { _volumeCalls.append(device) }
+        return true
+    }
+
+    func observeChanges(_ handler: @escaping @MainActor (AudioHardwareChange) -> Void) {}
+}
+
+/// The device service with fake hardware: choices, exclusions, priority,
+/// auto mic volume, the query timeout and the lid warning.
+@MainActor
+final class AudioDeviceServiceTests: XCTestCase {
+
+    private let builtIn = AudioDevice(id: 10, uid: "BuiltInMicrophoneDevice", name: "MacBook Pro Microphone")
+    private let usb = AudioDevice(id: 20, uid: "usb-mic", name: "USB Mic")
+
+    private var suiteName = ""
+    private var defaults: UserDefaults!
+    private var settings: AppSettings!
+
+    override func setUp() async throws {
+        try await super.setUp()
+        suiteName = "AudioDeviceServiceTests.\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        settings = AppSettings(store: SettingsStore(defaults: defaults), secrets: InMemorySecretStore())
+    }
+
+    override func tearDown() async throws {
+        defaults.removePersistentDomain(forName: suiteName)
+        try await super.tearDown()
+    }
+
+    private func makeService(
+        devices: [AudioDevice]? = nil,
+        defaultID: AudioDeviceID? = 10,
+        live: LiveRecordingState? = nil,
+        recorder: AudioRecorder? = nil
+    ) -> (AudioDeviceService, FakeAudioHardware) {
+        let hardware = FakeAudioHardware(devices: devices ?? [builtIn, usb], defaultID: defaultID)
+        let service = AudioDeviceService(hardware: hardware)
+        service.attach(settings: settings.audio, recorder: recorder, live: live)
+        return (service, hardware)
+    }
+
+    func testFollowsTheDefaultUntilADeviceIsPicked() {
+        let (service, _) = makeService()
+        XCTAssertTrue(service.followsSystemDefault)
+        XCTAssertEqual(service.activeDevice, builtIn)
+        XCTAssertEqual(service.systemDefaultDevice, builtIn)
+
+        service.select(usb)
+        XCTAssertEqual(settings.audio.selectedInputDeviceID, "usb-mic")
+        XCTAssertFalse(settings.audio.useDefaultDevice)
+        XCTAssertEqual(settings.audio.selectionCounts["usb-mic"], 1)
+        XCTAssertEqual(service.pinnedUID, "usb-mic")
+        XCTAssertEqual(service.activeDevice, usb)
+
+        service.select(usb)
+        XCTAssertEqual(settings.audio.selectionCounts["usb-mic"], 2)
+
+        service.useSystemDefault()
+        XCTAssertTrue(service.followsSystemDefault)
+        XCTAssertEqual(service.activeDevice, builtIn)
+    }
+
+    func testExcludeHidesForgetsAndUnpins() {
+        let (service, _) = makeService()
+        service.select(usb)
+        service.togglePriority(usb)
+        XCTAssertTrue(service.isPriority(usb))
+
+        service.exclude(usb)
+        XCTAssertEqual(settings.audio.excludedDevices, ["usb-mic": "USB Mic"])
+        XCTAssertNil(settings.audio.priorityDevices["usb-mic"])
+        XCTAssertNil(settings.audio.selectionCounts["usb-mic"])
+        XCTAssertTrue(service.followsSystemDefault)
+        XCTAssertEqual(service.selectableDevices, [builtIn])
+        XCTAssertEqual(service.hiddenDevices.map(\.name), ["USB Mic"])
+
+        service.select(usb)
+        service.togglePriority(usb)
+        XCTAssertTrue(service.followsSystemDefault, "an excluded device cannot be picked")
+        XCTAssertFalse(service.isPriority(usb), "or marked priority")
+
+        service.restore(service.hiddenDevices[0])
+        XCTAssertEqual(service.selectableDevices, [builtIn, usb])
+        XCTAssertEqual(settings.audio.excludedDevices, [:])
+    }
+
+    func testAutoMicVolumeOnlyForTheSystemDefaultAtRecordingStart() {
+        let (service, hardware) = makeService()
+
+        _ = service.device(for: .monitoring)
+        XCTAssertEqual(hardware.volumeCalls, [], "the settings meter never changes the volume")
+
+        _ = service.device(for: .recording)
+        XCTAssertEqual(hardware.volumeCalls, [10])
+
+        service.select(usb)
+        _ = service.device(for: .recording)
+        XCTAssertEqual(hardware.volumeCalls, [10], "a pinned device keeps its volume")
+
+        service.useSystemDefault()
+        settings.audio.autoMicVolume = false
+        _ = service.device(for: .recording)
+        XCTAssertEqual(hardware.volumeCalls, [10])
+    }
+
+    func testSlowQueryTimesOutAndKeepsTheLastKnownDevices() {
+        let (service, hardware) = makeService()
+        hardware.delay = 1.5
+        hardware.devices = [usb]
+        service.queryTimeout = 0.2
+
+        let started = Date()
+        XCTAssertFalse(service.refresh())
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.0)
+        XCTAssertEqual(service.inputDevices, [builtIn, usb])
+    }
+
+    func testNumericDeviceIdMigratesToItsUID() {
+        settings.audio.selectedInputDeviceID = "20"
+        settings.audio.useDefaultDevice = false
+        _ = makeService()
+        XCTAssertEqual(settings.audio.selectedInputDeviceID, "usb-mic")
+        XCTAssertFalse(settings.audio.useDefaultDevice)
+    }
+
+    func testPriorityDeviceIsSelectedWhenItConnects() {
+        settings.audio.priorityDevices = ["usb-mic": 1_700_000_000]
+        let (service, hardware) = makeService(devices: [builtIn])
+        XCTAssertEqual(service.activeDevice, builtIn)
+
+        hardware.devices = [builtIn, usb]
+        service.hardwareChanged(.devices)
+        XCTAssertEqual(settings.audio.selectedInputDeviceID, "usb-mic")
+        XCTAssertFalse(settings.audio.useDefaultDevice)
+        XCTAssertEqual(service.activeDevice, usb)
+    }
+
+    func testMissingPinnedDeviceFallsBackWithoutClearingThePin() {
+        let (service, hardware) = makeService()
+        service.select(usb)
+        hardware.devices = [builtIn]
+        service.hardwareChanged(.devices)
+        XCTAssertEqual(service.activeDevice, builtIn)
+        XCTAssertEqual(settings.audio.selectedInputDeviceID, "usb-mic")
+
+        hardware.devices = [builtIn, usb]
+        service.hardwareChanged(.devices)
+        XCTAssertEqual(service.activeDevice, usb, "the pinned device returns when it reconnects")
+    }
+
+    func testLidWarningOnlyWhileTheBuiltInMicIsTheOnlyChoice() {
+        let live = LiveRecordingState()
+        let (service, hardware) = makeService(devices: [builtIn], live: live)
+        XCTAssertNil(live.lidWarning)
+
+        service.lidStateChanged(true)
+        XCTAssertEqual(live.lidWarning, AudioDeviceService.lidWarningText)
+        XCTAssertEqual(service.activeDevice, builtIn)
+
+        hardware.devices = [builtIn, usb]
+        service.hardwareChanged(.devices)
+        XCTAssertEqual(service.activeDevice, usb, "the external mic replaces the deaf built-in one")
+        XCTAssertNil(live.lidWarning)
+
+        service.lidStateChanged(false)
+        XCTAssertEqual(service.activeDevice, builtIn)
+    }
+
+    func testRecorderAsksTheServiceForItsDevice() throws {
+        let recorder = AudioRecorder()
+        let (service, _) = makeService(recorder: recorder)
+        service.select(usb)
+        let provider = try XCTUnwrap(recorder.deviceProvider)
+        XCTAssertEqual(provider(.monitoring), usb)
     }
 }
