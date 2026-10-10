@@ -67,9 +67,12 @@ final class StatsServiceTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let settings = AppSettings(store: SettingsStore(defaults: defaults), secrets: InMemorySecretStore())
-        XCTAssertEqual(settings.history.typingWPM, 40)
-        defaults.set(75.0, forKey: "parrot.general.typingWPM")
-        XCTAssertEqual(settings.history.typingWPM, 75)
+        XCTAssertEqual(settings.general.effectiveTypingWPM, 40)
+        settings.general.typingWPM = 75
+        XCTAssertEqual(settings.general.effectiveTypingWPM, 75)
+        XCTAssertEqual(defaults.double(forKey: "parrot.general.typingWPM"), 75, "one key, written by General")
+        settings.general.typingWPM = 0
+        XCTAssertEqual(settings.general.effectiveTypingWPM, 40, "a non-positive speed reads as the default")
         XCTAssertFalse(settings.history.savePromptContext, "prompt and context are off by default")
     }
 }

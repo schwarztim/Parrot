@@ -66,39 +66,6 @@ enum AppStatus: Equatable {
     case downloading(Double)
 }
 
-// MARK: - Supporting Models
-
-struct VoiceModel: Identifiable, Equatable {
-    let id: UUID
-    var name: String
-    var sizeDescription: String
-    var sizeBytes: Int64
-    var languageCount: Int
-    var performanceDescription: String
-    var isDownloaded: Bool
-    var downloadProgress: Double
-
-    init(
-        id: UUID = UUID(),
-        name: String,
-        sizeDescription: String,
-        sizeBytes: Int64,
-        languageCount: Int,
-        performanceDescription: String,
-        isDownloaded: Bool = false,
-        downloadProgress: Double = 0.0
-    ) {
-        self.id = id
-        self.name = name
-        self.sizeDescription = sizeDescription
-        self.sizeBytes = sizeBytes
-        self.languageCount = languageCount
-        self.performanceDescription = performanceDescription
-        self.isDownloaded = isDownloaded
-        self.downloadProgress = downloadProgress
-    }
-}
-
 // MARK: - App State
 
 /// Central application state for the Parrot voice-to-text app.
@@ -119,8 +86,6 @@ final class AppState {
 
     var recordingState: RecordingState = .idle
     var microphoneStatus: MicrophoneStatus = .permissionNotDetermined
-    var recordingDuration: TimeInterval = 0
-    var waveformAmplitudes: [Float] = []
 
     // MARK: - Pipeline Status
 
@@ -177,10 +142,6 @@ final class AppState {
 
     // MARK: - Settings (inline, for views that bind directly)
 
-    // Saved settings live in the `AppSettings` areas. This binding is not
-    // saved anywhere yet.
-    var enhanceRecordingHotkey: HotkeyBinding?
-
     /// Whether Parrot is registered as a login item. The system is the source
     /// of truth: read with `refreshLaunchAtLogin()`, change with
     /// `setLaunchAtLogin(_:)`.
@@ -201,16 +162,9 @@ final class AppState {
     var inputLevel: Float = 0
     private var levelPollTimer: Timer?
 
-    // Models
-    var availableModels: [VoiceModel] = [
-        VoiceModel(
-            name: "Parakeet V3",
-            sizeDescription: "~800 MB",
-            sizeBytes: 800_000_000,
-            languageCount: 25,
-            performanceDescription: "~190x real-time on Apple Silicon"
-        ),
-    ]
+    /// Parakeet V3 has been downloaded and loaded once this launch
+    /// (onboarding's model step reads it).
+    private(set) var isModelReady = false
 
     // Onboarding
     var microphonePermissionGranted: Bool = false
@@ -257,19 +211,6 @@ final class AppState {
         }
     }
 
-    // MARK: - Computed Properties
-
-    var isModelReady: Bool {
-        availableModels.first?.isDownloaded ?? false
-    }
-
-    var modelStorageLocation: String {
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first?.path ?? "~/Library/Application Support"
-        return "\(appSupport)/Parrot/Models"
-    }
-
     // MARK: - Early Initialization
 
     /// Initializes the PermissionsManager early (before full setup) so that
@@ -308,18 +249,12 @@ final class AppState {
                 currentStatus = .downloading(progress)
                 modelDownloadProgress = progress
                 isDownloadingModel = progress < 1.0
-                if let i = availableModels.firstIndex(where: { $0.name == "Parakeet V3" }) {
-                    availableModels[i].downloadProgress = progress
-                }
             case .ready:
                 if case .downloading = currentStatus {
                     currentStatus = .idle
                 }
                 isDownloadingModel = false
-                if let i = availableModels.firstIndex(where: { $0.name == "Parakeet V3" }) {
-                    availableModels[i].isDownloaded = true
-                    availableModels[i].downloadProgress = 1.0
-                }
+                isModelReady = true
             case .failed(let error):
                 currentStatus = .error("Model setup failed: \(error.localizedDescription)")
                 errorMessage = error.localizedDescription
@@ -718,8 +653,6 @@ extension AppState: DictationControllerDelegate {
             isRecording = false
             recordingState = .idle
             currentStatus = .idle
-            recordingDuration = 0
-            waveformAmplitudes = []
             return
         }
 
@@ -728,8 +661,6 @@ extension AppState: DictationControllerDelegate {
             lastTranscription = session.text
             recordingState = .idle
             currentStatus = .idle
-            recordingDuration = 0
-            waveformAmplitudes = []
             isEnhanceMode = false
             settings?.general.successfulDictationCount += 1
         case .failed(let message):

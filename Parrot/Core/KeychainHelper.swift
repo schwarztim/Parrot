@@ -29,29 +29,10 @@ enum KeychainHelper {
         return status == errSecSuccess
     }
 
-    /// Retrieves a string value from the Keychain.
-    static func load(service: String, account: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-
-        guard status == errSecSuccess, let data = result as? Data else {
-            return nil
-        }
-        return String(data: data, encoding: .utf8)
-    }
-
     /// Retrieves a string value, telling a missing item apart from a failed
     /// read. Returns nil only when no item exists; throws for anything else,
     /// such as a locked keychain over ssh (errSecInteractionNotAllowed) or an
-    /// unreadable value. `load` folds both cases into nil.
+    /// unreadable value.
     static func read(service: String, account: String) throws -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

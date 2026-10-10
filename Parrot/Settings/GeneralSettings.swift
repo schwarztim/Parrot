@@ -91,6 +91,12 @@ final class GeneralSettings {
         didSet { store.set(typingWPM, forKey: Key.typingWPM) }
     }
 
+    /// `typingWPM`, or the default when the stored value is not positive.
+    /// The one reading of typing speed for "time saved" outside the views.
+    var effectiveTypingWPM: Double {
+        typingWPM > 0 ? typingWPM : Self.defaultTypingWPM
+    }
+
     /// The onboarding page reached, so a relaunch resumes there.
     var onboardingProgress: Int {
         didSet { store.set(onboardingProgress, forKey: Key.onboardingProgress) }

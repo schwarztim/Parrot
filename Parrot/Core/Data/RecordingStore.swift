@@ -41,7 +41,7 @@ final class RecordingStore {
     func start(services: AppServices) {
         self.services = services
         let stats = HistoryStatsService(history: services.history)
-        stats.typingWPM = { [weak services] in services?.settings?.history.typingWPM ?? HistorySettings.defaultTypingWPM }
+        stats.typingWPM = { [weak services] in services?.settings?.general.effectiveTypingWPM ?? GeneralSettings.defaultTypingWPM }
         services.stats = stats
 
         guard let history = services.history else { return }
