@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Recording window style and launch at login. [UI]
+/// Recording window style and closing, menu bar click and launch at login. [UI]
 struct GeneralSettingsView: View {
     /// Shown in the sidebar (see SidebarTab.isAvailable).
     static let isReady = true
@@ -10,6 +10,7 @@ struct GeneralSettingsView: View {
 
     var body: some View {
         @Bindable var recorder = appSettings.recorder
+        @Bindable var general = appSettings.general
 
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
@@ -36,6 +37,25 @@ struct GeneralSettingsView: View {
                         Text(windowStyleDescription)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+
+                        Toggle("Always close", isOn: $recorder.closeAfterResult)
+
+                        Text(
+                            "Close the recording window when a dictation completes, even if Parrot could not paste. Off keeps the text on screen until you close it."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+
+                    // Menu Bar
+                    Section("Menu Bar") {
+                        Toggle("Start Recording on Menubar Click", isOn: $general.menubarClickRecords)
+
+                        Text(
+                            "Left click the menu bar icon to start or stop a recording. Right click opens the menu."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
 
                     // General

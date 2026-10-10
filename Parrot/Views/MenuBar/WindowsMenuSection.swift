@@ -1,6 +1,6 @@
 import AppKit
 
-/// Items that open Parrot's windows. [UI]
+/// History... and Settings..., which open Parrot's main window. [UI]
 @MainActor
 struct WindowsMenuSection: MenuSection {
     let context: MenuContext
@@ -11,9 +11,12 @@ struct WindowsMenuSection: MenuSection {
 
     func items() -> [NSMenuItem] {
         let windows = context.windows
-        // Open main window (or resume onboarding if it isn't finished).
         return [
-            ActionMenuItem(title: "Open Parrot...", keyEquivalent: ",") {
+            ActionMenuItem(title: "History...", systemImage: "clock.arrow.circlepath") {
+                windows.showTab(.history)
+            },
+            // The main window (or onboarding if it isn't finished).
+            ActionMenuItem(title: "Settings...", systemImage: "gearshape", keyEquivalent: ",") {
                 windows.openParrot()
             },
         ]

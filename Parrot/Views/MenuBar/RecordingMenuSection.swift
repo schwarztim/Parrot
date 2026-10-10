@@ -1,6 +1,6 @@
 import AppKit
 
-/// Dictation status and permission health rows. [UI]
+/// Start or Stop Recording, dictation status and permission health rows. [UI]
 @MainActor
 struct RecordingMenuSection: MenuSection {
     let context: MenuContext
@@ -10,7 +10,7 @@ struct RecordingMenuSection: MenuSection {
     }
 
     func items() -> [NSMenuItem] {
-        var items = [statusItem()]
+        var items = [toggleItem(), statusItem()]
 
         // Permission health rows (only after onboarding, only when unhealthy).
         if context.settings.general.hasCompletedOnboarding {
@@ -26,6 +26,27 @@ struct RecordingMenuSection: MenuSection {
             }
         }
         return items
+    }
+
+    /// Starts when idle, stops while recording, and is disabled while a
+    /// recording is being processed.
+    private func toggleItem() -> NSMenuItem {
+        let appState = context.appState
+        switch appState.controller.phase {
+        case .idle:
+            return ActionMenuItem(title: "Start Recording", systemImage: "mic") {
+                appState.toggleDictation(trigger: .menu)
+            }
+        case .starting, .recording:
+            return ActionMenuItem(title: "Stop Recording", systemImage: "stop.circle") {
+                appState.toggleDictation(trigger: .menu)
+            }
+        case .stopping, .processing:
+            let item = NSMenuItem(title: "Stop Recording", action: nil, keyEquivalent: "")
+            item.image = NSImage(systemSymbolName: "stop.circle", accessibilityDescription: nil)
+            item.isEnabled = false
+            return item
+        }
     }
 
     private func statusItem() -> NSMenuItem {

@@ -3,8 +3,9 @@ import XCTest
 
 @testable import Parrot
 
-/// The app shell without a GUI: which sidebar tabs show, tab requests, and
-/// the status menu's items. Showing the status item and windows needs a
+/// The app shell without a GUI: which sidebar tabs show, tab requests, the
+/// status menu's items, the status icon's states and frames, UI settings
+/// and the quick start labels. Showing the status item and windows needs a
 /// logged-in GUI session and is not covered here.
 @MainActor
 final class ShellTests: XCTestCase {
@@ -59,19 +60,149 @@ final class ShellTests: XCTestCase {
 
     // MARK: - Status Menu
 
-    func testMenuHasStatusOpenVersionAndQuit() {
+    func testMenuHasToggleStatusWindowsVersionAndQuit() {
         let menu = NSMenu()
         MenuLayout.populate(menu, context: makeContext(onboarded: false))
         let titles = menu.items.map(\.title)
 
-        XCTAssertEqual(titles.first, "Ready")
-        XCTAssertTrue(titles.contains("Open Parrot..."))
+        XCTAssertEqual(Array(titles.prefix(2)), ["Start Recording", "Ready"])
+        XCTAssertTrue(menu.items[0].isEnabled)
+        XCTAssertFalse(menu.items[1].isEnabled, "the status row is a label")
+        XCTAssertTrue(titles.contains("History..."))
+        XCTAssertTrue(titles.contains("Settings..."))
+        XCTAssertLessThan(titles.firstIndex(of: "History...")!, titles.firstIndex(of: "Settings...")!)
         XCTAssertEqual(titles.last, "Quit Parrot")
         XCTAssertTrue(titles[titles.count - 2].hasPrefix("Parrot "), "version item before Quit")
         XCTAssertEqual(menu.items.last?.keyEquivalent, "q")
-        XCTAssertEqual(menu.items.first { $0.title == "Open Parrot..." }?.keyEquivalent, ",")
+        XCTAssertEqual(menu.items.first { $0.title == "Settings..." }?.keyEquivalent, ",")
         // No permission rows during onboarding.
         XCTAssertFalse(titles.contains { $0.contains("grant") })
+    }
+
+    // MARK: - Status Icon
+
+    func testStatusIconFollowsThePhase() {
+        XCTAssertEqual(StatusIconState.resolve(phase: .idle, status: .idle, isCompleting: false), .ready)
+        XCTAssertEqual(StatusIconState.resolve(phase: .starting, status: .idle, isCompleting: false), .recording)
+        XCTAssertEqual(StatusIconState.resolve(phase: .recording, status: .recording, isCompleting: false), .recording)
+        XCTAssertEqual(StatusIconState.resolve(phase: .stopping, status: .recording, isCompleting: false), .working)
+        XCTAssertEqual(StatusIconState.resolve(phase: .processing, status: .processing, isCompleting: false), .working)
+    }
+
+    func testStatusIconLoadingAndComplete() {
+        XCTAssertEqual(StatusIconState.resolve(phase: .idle, status: .downloading(0.4), isCompleting: false), .loading)
+        XCTAssertEqual(StatusIconState.resolve(phase: .idle, status: .idle, isCompleting: true), .complete)
+        XCTAssertEqual(StatusIconState.resolve(phase: .idle, status: .error("x"), isCompleting: false), .ready)
+        // A recording in progress wins over a download or a stale complete.
+        XCTAssertEqual(StatusIconState.resolve(phase: .recording, status: .downloading(0.4), isCompleting: true), .recording)
+    }
+
+    func testOnlyRecordingAndWorkingAnimate() {
+        XCTAssertTrue(StatusIconState.recording.isAnimated)
+        XCTAssertTrue(StatusIconState.working.isAnimated)
+        XCTAssertFalse(StatusIconState.ready.isAnimated)
+        XCTAssertFalse(StatusIconState.loading.isAnimated)
+        XCTAssertFalse(StatusIconState.complete.isAnimated)
+    }
+
+    func testIconFramesCycleAndRiseWithLevel() {
+        XCTAssertEqual(StatusIconFrames.interval, 0.025)
+        let quiet = StatusIconFrames.recordingBars(frame: 3, level: 0)
+        let loud = StatusIconFrames.recordingBars(frame: 3, level: 1)
+        XCTAssertEqual(quiet.count, 5)
+        for (low, high) in zip(quiet, loud) {
+            XCTAssertGreaterThan(high, low)
+            XCTAssertLessThanOrEqual(high, 1)
+            XCTAssertGreaterThan(low, 0)
+        }
+        XCTAssertEqual(
+            StatusIconFrames.recordingBars(frame: 3, level: 0.5),
+            StatusIconFrames.recordingBars(frame: 3 + StatusIconFrames.cycle, level: 0.5)
+        )
+        XCTAssertNotEqual(StatusIconFrames.recordingBars(frame: 0, level: 0), StatusIconFrames.recordingBars(frame: 10, level: 0))
+
+        let dots = StatusIconFrames.workingDots(frame: 5)
+        XCTAssertEqual(dots.count, 3)
+        XCTAssertTrue(dots.allSatisfy { $0 >= 0.3 && $0 <= 1 })
+        XCTAssertNotEqual(StatusIconFrames.workingDots(frame: 0), StatusIconFrames.workingDots(frame: 20))
+    }
+
+    func testIconImagesAreTemplates() {
+        for state in [StatusIconState.loading, .ready, .recording, .working, .complete] {
+            let image = StatusIconFrames.image(for: state, frame: 7, level: 0.3, needsAttention: false)
+            XCTAssertNotNil(image, "\(state)")
+            XCTAssertEqual(image?.isTemplate, true, "\(state)")
+        }
+    }
+
+    // MARK: - UI Settings
+
+    func testUISettingDefaultsAndNoWriteOnInit() {
+        let settings = AppSettings(store: SettingsStore(defaults: defaults), secrets: InMemorySecretStore())
+        XCTAssertNil(settings.recorder.positionX)
+        XCTAssertNil(settings.recorder.positionY)
+        XCTAssertFalse(settings.recorder.closeAfterResult)
+        XCTAssertFalse(settings.general.menubarClickRecords)
+        for key in ["parrot.recorder.positionX", "parrot.recorder.positionY", "parrot.recorder.closeAfterResult", "parrot.general.menubarClickRecords"] {
+            XCTAssertNil(defaults.object(forKey: key), "\(key) written on init")
+        }
+    }
+
+    func testUISettingsRoundTrip() {
+        let first = AppSettings(store: SettingsStore(defaults: defaults), secrets: InMemorySecretStore())
+        first.recorder.positionX = 120
+        first.recorder.positionY = -40
+        first.recorder.closeAfterResult = true
+        first.general.menubarClickRecords = true
+
+        let second = AppSettings(store: SettingsStore(defaults: defaults), secrets: InMemorySecretStore())
+        XCTAssertEqual(second.recorder.positionX, 120)
+        XCTAssertEqual(second.recorder.positionY, -40)
+        XCTAssertTrue(second.recorder.closeAfterResult)
+        XCTAssertTrue(second.general.menubarClickRecords)
+
+        // Clearing the position removes the keys (back to the default spot).
+        second.recorder.positionX = nil
+        second.recorder.positionY = nil
+        XCTAssertNil(defaults.object(forKey: "parrot.recorder.positionX"))
+        let third = AppSettings(store: SettingsStore(defaults: defaults), secrets: InMemorySecretStore())
+        XCTAssertNil(third.recorder.positionX)
+        XCTAssertNil(third.recorder.positionY)
+    }
+
+    // MARK: - Quick Start
+
+    func testQuickStartShowsTheSavedBindings() {
+        let settings = AppSettings(store: SettingsStore(defaults: defaults), secrets: InMemorySecretStore())
+        XCTAssertEqual(
+            ShortcutLabels(hotkeys: settings.hotkeys).quickStartRows.map(\.keys),
+            ["Right Option", "Esc"]
+        )
+
+        settings.hotkeys.hotkeyBinding = HotkeyBinding(keyCode: 0x36, modifiers: [], displayName: "Right Command")
+        settings.hotkeys.pushToTalkBinding = HotkeyBinding(keyCode: 0x3F, modifiers: [], displayName: "Fn")
+        settings.hotkeys.cancelHotkeyBinding = HotkeyBinding(keyCode: 0x33, modifiers: [.command], displayName: "Cmd+Delete")
+        let rows = ShortcutLabels(hotkeys: settings.hotkeys).quickStartRows
+        XCTAssertEqual(rows.map(\.keys), ["Right Command", "Fn", "Cmd+Delete"])
+        XCTAssertEqual(rows.last?.action, "Cancel recording")
+    }
+
+    func testQuickStartSkipsEmptyAndDuplicateBindings() {
+        let labels = ShortcutLabels(dictation: nil, pushToTalk: nil, cancel: "Esc")
+        XCTAssertEqual(labels.quickStartRows.map(\.keys), ["Esc"])
+
+        let same = ShortcutLabels(dictation: "Fn", pushToTalk: "Fn", cancel: "Esc")
+        XCTAssertEqual(same.quickStartRows.map(\.keys), ["Fn", "Esc"])
+
+        XCTAssertNil(ShortcutLabels.label(.empty))
+        XCTAssertEqual(ShortcutLabels.label(HotkeyBinding(keyCode: 0, modifiers: [], displayName: "Mouse 4", mouseButton: 3)), "Mouse 4")
+    }
+
+    func testRecorderInstallsWithoutAPanel() {
+        let context = makeContext(onboarded: true)
+        XCTAssertNotNil(context.windows.recorder)
+        XCTAssertTrue(RecorderWindowController.current === context.windows.recorder)
+        XCTAssertEqual(context.windows.recorder?.model.state.screen, .hidden)
     }
 
     func testPermissionRowsShowAfterOnboarding() {
