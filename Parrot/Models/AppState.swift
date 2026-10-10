@@ -55,15 +55,6 @@ enum MicrophoneStatus: String {
     case permissionNotDetermined = "Not Determined"
 }
 
-enum OnboardingStep: Int, CaseIterable {
-    case welcome = 0
-    case microphonePermission = 1
-    case inputMonitoring = 2
-    case accessibility = 3
-    case modelDownload = 4
-    case tryIt = 5
-}
-
 // MARK: - AppStatus
 
 /// Represents the current operational status of the app.
@@ -218,7 +209,6 @@ final class AppState {
     ]
 
     // Onboarding
-    var currentOnboardingStep: OnboardingStep = .welcome
     var microphonePermissionGranted: Bool = false
     var inputMonitoringPermissionGranted: Bool = false
     var accessibilityPermissionGranted: Bool = false
