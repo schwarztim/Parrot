@@ -127,7 +127,7 @@ struct GrowingTextArea<Content: View>: View {
                             Color.clear.preference(key: MeasuredHeightKey.self, value: geometry.size.height)
                         }
                     )
-                Color.clear.frame(height: 1).id("bottom")
+                    .id("content")
             }
             .frame(width: width, height: height)
             .mask(
@@ -143,10 +143,10 @@ struct GrowingTextArea<Content: View>: View {
             )
             .onPreferenceChange(MeasuredHeightKey.self) { contentHeight = $0 }
             .onChange(of: scrollKey) {
-                proxy.scrollTo("bottom", anchor: .bottom)
+                proxy.scrollTo("content", anchor: .bottom)
             }
             .onChange(of: contentHeight) {
-                proxy.scrollTo("bottom", anchor: .bottom)
+                proxy.scrollTo("content", anchor: .bottom)
             }
         }
     }
@@ -238,13 +238,14 @@ struct ModeChangedHUDView: View {
 
 // MARK: - Pulse
 
-/// A slow opacity pulse, used for the recording dot.
+/// A slow opacity pulse, used for the recording dot. Steady when inactive.
 struct PulseModifier: ViewModifier {
+    var active = true
     @State private var isPulsing = false
 
     func body(content: Content) -> some View {
         content
-            .opacity(isPulsing ? 0.4 : 1.0)
+            .opacity(active && isPulsing ? 0.4 : 1.0)
             .animation(
                 .easeInOut(duration: 0.8)
                     .repeatForever(autoreverses: true),

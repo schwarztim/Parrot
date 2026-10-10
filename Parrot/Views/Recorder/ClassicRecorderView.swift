@@ -100,7 +100,7 @@ struct ClassicRecorderView: View {
             Circle()
                 .fill(dotColor)
                 .frame(width: 8, height: 8)
-                .modifier(PulseModifier())
+                .modifier(PulseModifier(active: [.ready, .wave, .liveText, .cancelGuard, .processing].contains(state.screen)))
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(state.modeName)
