@@ -208,11 +208,13 @@ actor TranscriptionEngine {
     /// lines or the toggle changed since the last call.
     func applyVocabulary(_ entries: [VocabularyEntry], enabled: Bool) async {
         guard modelsLoaded else { return }
-        let lines = Self.simpleFormatLines(from: entries)
-        let signature = enabled ? lines.joined(separator: "\n") : ""
+        let signature = Self.signature(lines: Self.simpleFormatLines(from: entries), enabled: enabled)
         guard signature != vocabularySignature else { return }
         await configureVocabulary(entries: entries, enabled: enabled)
-        vocabularySignature = signature
+    }
+
+    private static func signature(lines: [String], enabled: Bool) -> String {
+        enabled ? lines.joined(separator: "\n") : ""
     }
 
     /// Enables or disables decode-time vocabulary boosting so proper nouns and
@@ -230,6 +232,9 @@ actor TranscriptionEngine {
         guard asrManager != nil, modelsLoaded else { return }
 
         let lines = Self.simpleFormatLines(from: entries)
+        // Recorded even when configuration fails, so a broken term list is
+        // not retried (and the CTC model reloaded) on every dictation.
+        vocabularySignature = Self.signature(lines: lines, enabled: enabled)
         guard enabled, !lines.isEmpty else {
             vocabularyBoosting = nil
             vocabularyBoostingActive = false
