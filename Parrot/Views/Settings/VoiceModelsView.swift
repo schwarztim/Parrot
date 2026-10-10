@@ -76,6 +76,20 @@ struct VoiceModelsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                Divider()
+
+                Picker("Keep model loaded", selection: $transcription.activeDuration) {
+                    Text("30 seconds").tag(30.0)
+                    Text("1 minute").tag(60.0)
+                    Text("5 minutes").tag(300.0)
+                    Text("15 minutes").tag(900.0)
+                    Text("1 hour").tag(3600.0)
+                    Text("Always").tag(0.0)
+                }
+                Text("How long an on-device voice model stays in memory after a dictation. It loads again when you next record.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             .padding(4)
         }
