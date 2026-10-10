@@ -263,4 +263,21 @@ final class RecordingStoreTests: XCTestCase {
         let samples = try XCTUnwrap(RecordingStore.loadSamples(from: url))
         XCTAssertGreaterThan(samples.count, 16_000 / 2)
     }
+
+    func testReprocessInputLoadsAudioOrFallsBackToText() throws {
+        let fixture = try XCTUnwrap(Bundle.module.url(forResource: "hello-parrot", withExtension: "wav", subdirectory: "Resources"))
+        let services = makeServices()
+        services.recordings.start(services: services)
+        let withAudio = try history.insert(HistoryRecord(rawTranscript: "hello parrot", finalText: "Hello, Parrot.", audioPath: fixture.path))
+        let textOnly = try history.insert(HistoryRecord(rawTranscript: "only text", finalText: "Only text."))
+
+        let audio = try XCTUnwrap(services.recordings.reprocessInput(historyID: withAudio.id))
+        XCTAssertEqual(audio.samples.count, try XCTUnwrap(RecordingStore.loadSamples(from: fixture)).count)
+        XCTAssertGreaterThan(audio.samples.count, 0)
+
+        let text = try XCTUnwrap(services.recordings.reprocessInput(historyID: textOnly.id))
+        XCTAssertTrue(text.samples.isEmpty)
+        XCTAssertEqual(text.rawTranscript, "only text")
+        XCTAssertNil(services.recordings.reprocessInput(historyID: 999_999))
+    }
 }

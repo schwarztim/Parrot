@@ -294,6 +294,15 @@ final class RecordingStore {
         return Self.loadSamples(from: URL(fileURLWithPath: path))
     }
 
+    /// What `DictationController.reprocess(historyID:mode:)` needs: the
+    /// entry's audio (empty when it has none) and its raw transcript, used
+    /// as the text when there is no audio. Nil for an unknown id.
+    func reprocessInput(historyID id: Int64) -> (samples: [Float], rawTranscript: String)? {
+        guard let entry = try? services?.history?.entry(id: id) else { return nil }
+        let samples = entry.audioPath.flatMap { Self.loadSamples(from: URL(fileURLWithPath: $0)) } ?? []
+        return (samples, entry.rawTranscript)
+    }
+
     /// Reads any audio file AVFoundation can open as 16 kHz mono Float32:
     /// channels are averaged, other rates resampled linearly. Nil when
     /// unreadable.
