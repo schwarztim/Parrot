@@ -140,27 +140,28 @@ final class AppState {
 
     // MARK: - Modes (UI-level)
 
-    /// UI-level mode list. Mirrored into ModeManager for persistence whenever
-    /// a view mutates it.
-    var modes: [Mode] = [
-        Mode(
-            name: "General",
-            description: "Default dictation mode",
-            isDefault: true
-        ),
-        Mode(
-            name: "Code",
-            description: "Optimized for programming terminology"
-        ),
-    ] {
-        didSet { modeManager?.replaceAll(modes) }
+    /// The mode list, read straight from ModeManager (one file per mode).
+    /// Writes go through `replaceAll`. A fresh install gets ModePresets from
+    /// the manager itself; AppState no longer seeds or mirrors modes.
+    var modes: [Mode] {
+        get {
+            _ = modesRevision
+            return modeManager?.modes ?? []
+        }
+        set { modeManager?.replaceAll(newValue) }
     }
+    /// Bumped when setup installs the ModeManager, so views that rendered
+    /// before setup re-read `modes` and `currentMode`.
+    private var modesRevision = 0
     /// The selected mode. ModeManager is the source of truth once it exists,
     /// so every writer (hotkeys, URLs, the recorder, the mode list) and every
     /// reader see the same mode; `launchMode` only covers the moment before
     /// setup creates the manager.
     var currentMode: Mode? {
-        get { modeManager?.selectedMode ?? launchMode }
+        get {
+            _ = modesRevision
+            return modeManager?.selectedMode ?? launchMode
+        }
         set {
             launchMode = newValue
             if let newValue, let modeManager, modeManager.selectedMode.id != newValue.id {
@@ -254,7 +255,6 @@ final class AppState {
         let services = AppServices(vocabulary: vocabularyManager)
         self.services = services
         self.controller = DictationController(services: services)
-        currentMode = modes.first(where: { $0.isDefault })
 
         controller.delegate = self
         services.recorderUI = self
@@ -477,15 +477,11 @@ final class AppState {
             _ = try? historyStore?.pruneOlderThan(days: days)
         }
 
-        // Mode manager. On first launch, seed the persisted store with the
-        // built-in UI modes; afterwards the persisted list is authoritative.
+        // Mode manager: the persisted per-mode files are authoritative, and a
+        // fresh install is seeded with ModePresets by the manager itself.
         let modeManager = ModeManager()
-        if modeManager.isFreshInstall {
-            modeManager.replaceAll(modes)
-        }
-        self.modes = modeManager.modes
-        self.currentMode = modeManager.selectedMode
         services.modes = modeManager
+        modesRevision += 1
 
         // Hotkey listener: key down starts and key up stops a dictation
         // through the controller.
