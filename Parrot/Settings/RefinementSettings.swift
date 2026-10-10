@@ -22,6 +22,13 @@ final class RefinementSettings {
         static let anthropicModel = "parrot.anthropicModel"
         static let destinationAwareRefinement = "parrot.destinationAwareRefinement"
         static let contextLocalOnly = "parrot.contextLocalOnly"
+        static let groqModel = "parrot.llm.groqModel"
+        static let geminiModel = "parrot.llm.geminiModel"
+        static let deepseekModel = "parrot.llm.deepseekModel"
+        static let compatibleBaseURL = "parrot.llm.compatibleBaseURL"
+        static let compatibleModel = "parrot.llm.compatibleModel"
+        static let customModels = "parrot.llm.customModels"
+        static let includeContactCard = "parrot.llm.includeContactCard"
     }
 
     /// Legacy enhance-mode Keychain service, migrated to the Azure item.
@@ -83,6 +90,40 @@ final class RefinementSettings {
         didSet { store.set(contextLocalOnly, forKey: Key.contextLocalOnly) }
     }
 
+    var groqModel: String {
+        didSet { store.set(groqModel, forKey: Key.groqModel) }
+    }
+
+    var geminiModel: String {
+        didSet { store.set(geminiModel, forKey: Key.geminiModel) }
+    }
+
+    var deepseekModel: String {
+        didSet { store.set(deepseekModel, forKey: Key.deepseekModel) }
+    }
+
+    /// API root of the generic OpenAI-compatible endpoint, with the version
+    /// path. Loopback addresses count as local (no redaction).
+    var compatibleBaseURL: String {
+        didSet { store.set(compatibleBaseURL, forKey: Key.compatibleBaseURL) }
+    }
+
+    var compatibleModel: String {
+        didSet { store.set(compatibleModel, forKey: Key.compatibleModel) }
+    }
+
+    /// Models added with "Bring your own key". No secrets: keys stay in
+    /// `ProviderCredentials`.
+    var customModels: [CustomLanguageModel] {
+        didSet { store.setEncoded(customModels, forKey: Key.customModels) }
+    }
+
+    /// Share the Contacts "Me" card (name, email, phone) in modes with
+    /// application context on.
+    var includeContactCard: Bool {
+        didSet { store.set(includeContactCard, forKey: Key.includeContactCard) }
+    }
+
     private let store: SettingsStore
 
     /// Runs the legacy enhance migration, then loads. AppSettings builds this
@@ -102,6 +143,13 @@ final class RefinementSettings {
         anthropicModel = store.string(Key.anthropicModel, default: "claude-haiku-4-5")
         destinationAwareRefinement = store.bool(Key.destinationAwareRefinement, default: true)
         contextLocalOnly = store.bool(Key.contextLocalOnly, default: true)
+        groqModel = store.string(Key.groqModel, default: "llama-3.3-70b-versatile")
+        geminiModel = store.string(Key.geminiModel, default: "gemini-2.5-flash")
+        deepseekModel = store.string(Key.deepseekModel, default: "deepseek-chat")
+        compatibleBaseURL = store.string(Key.compatibleBaseURL, default: "http://localhost:1234/v1")
+        compatibleModel = store.string(Key.compatibleModel, default: "")
+        customModels = store.decoded([CustomLanguageModel].self, forKey: Key.customModels) ?? []
+        includeContactCard = store.bool(Key.includeContactCard, default: false)
         self.store = store
     }
 

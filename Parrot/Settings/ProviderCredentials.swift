@@ -11,10 +11,14 @@ enum ProviderID: String, CaseIterable, Sendable {
     case anthropic = "com.parrot.anthropic"
     case localServer = "com.parrot.local-server"
 
-    // Predeclared for upcoming providers; nothing reads these yet.
+    // Language model providers added for modes.
     case groq = "com.parrot.groq"
     case gemini = "com.parrot.gemini"
     case deepseek = "com.parrot.deepseek"
+    /// The generic OpenAI-compatible endpoint (one key for all of them).
+    case openAICompatible = "com.parrot.openai-compatible"
+
+    // Predeclared for upcoming transcription providers (ASR).
     case deepgram = "com.parrot.deepgram"
     case elevenlabs = "com.parrot.elevenlabs"
 
@@ -105,6 +109,12 @@ final class ProviderCredentials {
     var localServerKey: String {
         get { key(for: .localServer) }
         set { update(newValue, for: .localServer) }
+    }
+
+    /// A settings field edit for any provider. Like the properties above, an
+    /// unchanged value writes nothing.
+    func editKey(_ value: String, for id: ProviderID) {
+        update(value, for: id)
     }
 
     /// A field edit. Skips unchanged values, so a field that only redraws
