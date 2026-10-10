@@ -75,7 +75,10 @@ struct ConfigurationView: View {
 
                     // General
                     Section("General") {
-                        Toggle("Launch at Login", isOn: $state.launchAtLogin)
+                        Toggle("Launch at Login", isOn: Binding(
+                            get: { appState.launchAtLogin },
+                            set: { appState.setLaunchAtLogin($0) }
+                        ))
 
                         Text(
                             "Automatically start Parrot when you log in to your Mac."
@@ -161,6 +164,10 @@ struct ConfigurationView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.windowBackgroundColor))
+        // Show the real login item status, which can change in System Settings.
+        .onAppear {
+            appState.refreshLaunchAtLogin()
+        }
         // Persist hotkey changes and sync to the runtime HotkeyManager
         .onChange(of: appState.toggleRecordingHotkey) { _, newValue in
             appSettings.hotkeyBinding = newValue

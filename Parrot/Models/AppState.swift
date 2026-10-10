@@ -3,6 +3,7 @@ import AVFoundation
 import Combine
 import Foundation
 import Observation
+import ServiceManagement
 import SwiftUI
 
 // MARK: - Debug Logging
@@ -182,7 +183,11 @@ final class AppState {
     var cancelRecordingHotkey: HotkeyBinding?
     var pushToTalkHotkey: HotkeyBinding?
     var enhanceRecordingHotkey: HotkeyBinding?
-    var launchAtLogin: Bool = false
+
+    /// Whether Parrot is registered as a login item. The system is the source
+    /// of truth: read with `refreshLaunchAtLogin()`, change with
+    /// `setLaunchAtLogin(_:)`.
+    private(set) var launchAtLogin: Bool = false
 
     // Enhance mode
     var isEnhanceMode: Bool = false
@@ -858,6 +863,35 @@ final class AppState {
                 apiVersion: settings.azureOpenAIAPIVersion
             )
         }
+    }
+
+    // MARK: - Launch at Login
+
+    /// Re-reads the login item status from ServiceManagement.
+    func refreshLaunchAtLogin() {
+        launchAtLogin = SMAppService.mainApp.status == .enabled
+    }
+
+    /// Registers or unregisters Parrot as a login item, then reflects the
+    /// real status. Failures surface as a toast and leave the toggle showing
+    /// what the system reports.
+    func setLaunchAtLogin(_ enabled: Bool) {
+        let service = SMAppService.mainApp
+        do {
+            if enabled {
+                try service.register()
+            } else {
+                try service.unregister()
+            }
+        } catch {
+            diagLog("[Parrot:LoginItem] \(enabled ? "register" : "unregister") FAILED: \(error)")
+            showTransientError("Could not change Launch at Login: \(error.localizedDescription)")
+        }
+        if enabled, service.status == .requiresApproval {
+            showTransientError("Allow Parrot in System Settings > General > Login Items to launch at login.")
+            SMAppService.openSystemSettingsLoginItems()
+        }
+        refreshLaunchAtLogin()
     }
 
     // MARK: - Transient Errors
