@@ -426,6 +426,9 @@ final class AppState {
     /// AVCaptureDevice.requestAccess). Also refreshes the granted flag.
     func startOnboardingMicMonitoring() {
         initAudioRecorder()
+        // Opening the input triggers the mic permission prompt; bring the
+        // wizard forward so the dialog can appear. Only onboarding does this.
+        NSApp.activate(ignoringOtherApps: true)
         startInputMonitoring()
         Task { @MainActor in
             guard let permissions = permissionsManager else { return }
@@ -577,10 +580,6 @@ final class AppState {
         diagLog("[Parrot:Setup] Starting HotkeyManager")
         hotkey.start()
 
-        // Verify audio engine works by starting the level monitor.
-        diagLog("[Parrot:Setup] About to start input monitoring (audioRecorder=\(audioRecorder != nil))")
-        startInputMonitoring()
-
         // Post-setup: log the full state so we can diagnose issues from the log alone.
         diagLog("[Parrot:Setup] === SETUP COMPLETE ===")
         diagLog("[Parrot:Setup] Model ready: \(isModelReady)")
@@ -620,8 +619,8 @@ final class AppState {
         captureDestinationContext()
         if let settings { RefinementService.warmUpIfLocal(settings: settings) }
 
-        // Stop level monitoring before recording to avoid engine conflicts.
-        stopInputMonitoring()
+        // Pause level monitoring before recording to avoid engine conflicts.
+        pauseLevelMeter()
 
         do {
             try recorder.startRecording()
@@ -642,8 +641,8 @@ final class AppState {
             currentStatus = .error("Recording failed: \(error.localizedDescription)")
             errorMessage = error.localizedDescription
             diagLog("[Parrot:AppState] Recording FAILED: \(error)")
-            // Restart level monitoring since recording failed.
-            startInputMonitoring()
+            // Resume level monitoring since recording failed.
+            resumeLevelMeterIfVisible()
         }
     }
 
@@ -686,7 +685,7 @@ final class AppState {
             RecordingOverlayPanel.hide()
             recordingState = .idle
             currentStatus = .idle
-            startInputMonitoring()
+            resumeLevelMeterIfVisible()
             return
         }
 
@@ -696,7 +695,7 @@ final class AppState {
             RecordingOverlayPanel.hide()
             recordingState = .idle
             currentStatus = .idle
-            startInputMonitoring()
+            resumeLevelMeterIfVisible()
             return
         }
 
@@ -781,8 +780,8 @@ final class AppState {
                     )
                 }
 
-                // Restart level monitoring.
-                self.startInputMonitoring()
+                // Resume the meter only if a view showing it is on screen.
+                self.resumeLevelMeterIfVisible()
 
             } catch {
                 diagLog("[Parrot:AppState] Transcription FAILED: \(error)")
@@ -791,7 +790,7 @@ final class AppState {
                 self.currentStatus = .error("Transcription failed: \(error.localizedDescription)")
                 self.errorMessage = error.localizedDescription
                 self.isEnhanceMode = false
-                self.startInputMonitoring()
+                self.resumeLevelMeterIfVisible()
             }
         }
     }
@@ -978,9 +977,28 @@ final class AppState {
 
     // MARK: - Input Level Monitoring
 
-    /// Starts monitoring the microphone input level for visualization.
+    /// True while a view that shows the input level meter (the Sound tab, the
+    /// onboarding microphone step) is on screen. The meter, and so the mic,
+    /// only runs while this is set; finishing a dictation never starts it.
+    private var levelMeterVisible = false
+
+    /// Called by a view that shows the input level meter when it appears.
     /// Updates `inputLevel` at ~20Hz. Does not record audio.
     func startInputMonitoring() {
+        levelMeterVisible = true
+        resumeLevelMeterIfVisible()
+    }
+
+    /// Called by a view that shows the input level meter when it disappears.
+    func stopInputMonitoring() {
+        levelMeterVisible = false
+        pauseLevelMeter()
+    }
+
+    /// Restarts the meter after a recording only if a meter view is still on
+    /// screen. Never activates Parrot.
+    private func resumeLevelMeterIfVisible() {
+        guard levelMeterVisible, !isRecording, levelPollTimer == nil else { return }
         guard let recorder = audioRecorder else {
             diagLog("[Parrot:AppState] startInputMonitoring: audioRecorder is nil!")
             return
@@ -1001,8 +1019,9 @@ final class AppState {
         }
     }
 
-    /// Stops monitoring and resets the input level.
-    func stopInputMonitoring() {
+    /// Stops the meter engine and resets the level, keeping track of whether
+    /// a meter view still wants it.
+    private func pauseLevelMeter() {
         levelPollTimer?.invalidate()
         levelPollTimer = nil
         audioRecorder?.stopMonitoring()

@@ -134,10 +134,10 @@ final class AudioRecorder {
             return
         }
 
-        // Accessing inputNode triggers the mic permission prompt.
-        // Ensure the app is foreground so the dialog can appear.
-        NSApp.activate(ignoringOtherApps: true)
-
+        // Accessing inputNode triggers the mic permission prompt. This must not
+        // activate Parrot: the meter can resume right after a dictation's
+        // paste, and stealing focus would race the Cmd+V. The onboarding mic
+        // step brings its window forward itself.
         let inputNode = monitorEngine.inputNode
         let hardwareFormat = inputNode.inputFormat(forBus: 0)
         diagLog("[Parrot:AudioRecorder] Monitor hardware format: rate=\(hardwareFormat.sampleRate), channels=\(hardwareFormat.channelCount)")
