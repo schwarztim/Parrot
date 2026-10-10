@@ -135,6 +135,58 @@ final class ShellTests: XCTestCase {
         }
     }
 
+    // MARK: - Back History
+
+    func testBackWalksTheTabHistory() {
+        let navigation = NavigationModel()
+        XCTAssertFalse(navigation.canGoBack)
+        navigation.request(.models)
+        navigation.request(.sound)
+        // A sidebar click writes the selection directly.
+        navigation.selectedTab = .general
+        XCTAssertEqual(navigation.history, [.home, .models, .sound])
+
+        navigation.goBack()
+        XCTAssertEqual(navigation.selectedTab, .sound)
+        navigation.goBack()
+        XCTAssertEqual(navigation.selectedTab, .models)
+        navigation.goBack()
+        XCTAssertEqual(navigation.selectedTab, .home)
+        XCTAssertFalse(navigation.canGoBack)
+        navigation.goBack()
+        XCTAssertEqual(navigation.selectedTab, .home)
+    }
+
+    func testBackSkipsHiddenTabsAndHistoryIsCapped() {
+        let navigation = NavigationModel()
+        navigation.request(.home)
+        XCTAssertTrue(navigation.history.isEmpty, "re-selecting the same tab adds nothing")
+
+        if let hidden = SidebarTab.allCases.first(where: { !$0.isAvailable }) {
+            navigation.selectedTab = .models
+            navigation.selectedTab = hidden
+            navigation.selectedTab = .sound
+            navigation.goBack()
+            XCTAssertEqual(navigation.selectedTab, .models)
+        }
+
+        for index in 0..<120 {
+            navigation.selectedTab = index.isMultiple(of: 2) ? .models : .sound
+        }
+        XCTAssertEqual(navigation.history.count, NavigationModel.historyLimit)
+    }
+
+    // MARK: - Dock and Theme
+
+    func testDockPolicyAndThemeAppearance() {
+        XCTAssertEqual(WindowManager.activationPolicy(showInDock: false, windowOpen: false), .accessory)
+        XCTAssertEqual(WindowManager.activationPolicy(showInDock: false, windowOpen: true), .regular)
+        XCTAssertEqual(WindowManager.activationPolicy(showInDock: true, windowOpen: false), .regular)
+        XCTAssertNil(WindowManager.appearance(for: .system))
+        XCTAssertEqual(WindowManager.appearance(for: .light)?.name, .aqua)
+        XCTAssertEqual(WindowManager.appearance(for: .dark)?.name, .darkAqua)
+    }
+
     // MARK: - UI Settings
 
     func testUISettingDefaultsAndNoWriteOnInit() {
