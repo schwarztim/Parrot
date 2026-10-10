@@ -77,9 +77,12 @@ final class DeliverStage: DictationStage {
             session.outcome = .pasted
             if await output.paste.confirm(target: target) == .unconfirmed {
                 // The field reads back unchanged: keep the dictation on the
-                // clipboard so it is never lost, and do not submit.
+                // clipboard so it is never lost, and do not submit. Reporting
+                // copiedOnly keeps the recorder open with the result and its
+                // Copy button instead of closing as if the paste had landed.
                 restoreDelay = nil
                 pressReturn = false
+                session.outcome = .copiedOnly
             }
         }
 
