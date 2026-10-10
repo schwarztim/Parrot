@@ -4,8 +4,9 @@ import Foundation
 ///
 /// Runs when `RefinementGate` says so (refinement on, forced, or a mode
 /// with its own model; never Voice). Fills the transcript into the prompt
-/// rendered at recording start, or renders one now for file and reprocess
-/// runs. Any failure (missing model, auth, network, a cut-short reply,
+/// rendered at recording start, renders it again when the user switched
+/// modes mid-recording, or renders one now for file and reprocess runs.
+/// Any failure (missing model, auth, network, a cut-short reply,
 /// cancellation) keeps the unrefined text and shows a toast; dictation is
 /// never lost.
 @MainActor
@@ -28,8 +29,7 @@ final class RefineStage: DictationStage {
         guard !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .continue }
 
         let mode = session.mode ?? services.modes?.selectedMode ?? Mode.defaultMode
-        let prompt = (session.prompt ?? Self.render(mode: mode, destination: session.context, settings: settings))
-            .filled(with: transcript)
+        let prompt = basePrompt(for: mode, session: session, settings: settings).filled(with: transcript)
         session.renderedPrompt = prompt.fullText
         let request = RefinementRequest(system: prompt.system, user: prompt.user, languageModelID: mode.languageModelID)
 
@@ -44,6 +44,24 @@ final class RefineStage: DictationStage {
             services.showTransientError(RefinementFallback.message(for: error))
         }
         return .continue
+    }
+
+    /// The prompt rendered at recording start, unless the user switched to
+    /// another mode since: then it is rendered again for `mode`, with the
+    /// destination captured at start. File and reprocess runs render one
+    /// here from what was saved.
+    private func basePrompt(for mode: Mode, session: DictationSession, settings: AppSettings) -> RenderedPrompt {
+        if let prompt = session.prompt, session.promptMode == nil || session.promptMode == mode {
+            return prompt
+        }
+        guard session.source == .live, let destination = session.context else {
+            return Self.render(mode: mode, destination: session.context, settings: settings)
+        }
+        let context = services.context.promptContext(for: mode, destination: destination, settings: settings)
+        let prompt = PromptRenderer.render(mode: mode, context: context)
+        session.prompt = prompt
+        session.promptMode = mode
+        return prompt
     }
 
     /// A prompt for a session that had no recording start (a file or a

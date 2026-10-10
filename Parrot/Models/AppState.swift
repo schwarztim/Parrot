@@ -147,7 +147,8 @@ final class AppState {
     /// The selected mode. ModeManager is the source of truth once it exists,
     /// so every writer (hotkeys, URLs, the recorder, the mode list) and every
     /// reader see the same mode; `launchMode` only covers the moment before
-    /// setup creates the manager.
+    /// setup creates the manager. A pick while recording also switches the
+    /// recording in progress to that mode.
     var currentMode: Mode? {
         get {
             _ = modesRevision
@@ -157,6 +158,9 @@ final class AppState {
             launchMode = newValue
             if let newValue, let modeManager, modeManager.selectedMode.id != newValue.id {
                 modeManager.selectMode(newValue)
+            }
+            if let mode = modeManager?.selectedMode ?? newValue {
+                controller.switchMode(to: mode)
             }
         }
     }

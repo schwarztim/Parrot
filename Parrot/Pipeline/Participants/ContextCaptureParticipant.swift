@@ -55,6 +55,7 @@ final class ContextCaptureParticipant: RecordingParticipant {
             let promptContext = services.context.promptContext(for: mode, destination: context, settings: settings)
             let prompt = PromptRenderer.render(mode: mode, context: promptContext)
             session.prompt = prompt
+            session.promptMode = mode
             session.renderedPrompt = prompt.fullText
             services.live.selectionChip = promptContext.selectedText.map(Self.chip)
             services.live.clipboardChip = promptContext.clipboardText.map(Self.chip)

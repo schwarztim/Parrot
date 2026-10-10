@@ -223,11 +223,23 @@ private enum RenderedPromptKey: SessionKey {
     static let defaultValue: RenderedPrompt? = nil
 }
 
+private enum PromptModeKey: SessionKey {
+    static let defaultValue: Mode? = nil
+}
+
 extension DictationSession {
     /// The prompt rendered at recording start (LLM). Nil for file and
     /// reprocess runs, which render it when refinement runs.
     var prompt: RenderedPrompt? {
         get { self[RenderedPromptKey.self] }
         set { self[RenderedPromptKey.self] = newValue }
+    }
+
+    /// The mode `prompt` was rendered for. When the user switches modes
+    /// mid-recording, `mode` no longer matches and RefineStage renders the
+    /// prompt again. Nil with a prompt set means "rendered for `mode`".
+    var promptMode: Mode? {
+        get { self[PromptModeKey.self] }
+        set { self[PromptModeKey.self] = newValue }
     }
 }
