@@ -31,6 +31,9 @@ final class AudioDeviceService {
     /// UID of the macOS default input.
     private(set) var defaultInputUID: String?
     private(set) var isLidClosed = false
+    /// Counts lid-closed episodes: bumps each time the lid warning turns
+    /// on, so the warning modal shows once per episode.
+    private(set) var lidWarningEpisode = 0
 
     /// Device queries give up after this long and keep the last known list.
     @ObservationIgnored var queryTimeout: TimeInterval = AudioDeviceService.defaultQueryTimeout
@@ -334,6 +337,7 @@ final class AudioDeviceService {
     private func updateLidWarning(_ resolution: DeviceResolver.Resolution? = nil) {
         let warning = (resolution ?? self.resolution).needsLidWarning ? Self.lidWarningText : nil
         if live?.lidWarning != warning {
+            if live?.lidWarning == nil { lidWarningEpisode += 1 }
             live?.lidWarning = warning
         }
     }

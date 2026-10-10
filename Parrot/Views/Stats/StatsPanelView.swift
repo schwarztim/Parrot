@@ -5,8 +5,8 @@ import UniformTypeIdentifiers
 // MARK: - Panel
 
 /// Home's stats panel (ui 5.4): a range picker and tiles for speed, words,
-/// dictations and time saved. Reads `services.stats`; with no stats yet
-/// every tile shows zero. [UI]
+/// dictations, apps used, most used mode and time saved. Reads
+/// `services.stats`; with no stats yet every tile shows zero. [UI]
 struct StatsPanelView: View {
     @Environment(AppState.self) private var appState
     @Environment(AppSettings.self) private var appSettings
@@ -65,6 +65,16 @@ struct StatsPanelView: View {
                     value: StatsMath.countText(snapshot.dictationCount),
                     label: "Dictations",
                     detail: range == .week ? "Recordings this week" : "Recordings since you started"
+                )
+                StatTile(
+                    value: StatsMath.countText(snapshot.appsUsed),
+                    label: "Apps used",
+                    detail: range == .week ? "Apps you dictated into this week" : "Apps you dictated into since you started"
+                )
+                StatTile(
+                    value: StatsMath.modeText(snapshot.mostUsedMode),
+                    label: "Most used mode",
+                    detail: range == .week ? "The mode you dictated with most this week" : "The mode you dictated with most since you started"
                 )
                 StatTile(
                     value: StatsMath.durationText(saved),

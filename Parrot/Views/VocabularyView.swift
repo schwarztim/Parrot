@@ -29,6 +29,11 @@ struct VocabularyView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            FirstRunToastStack(
+                screen: .vocabulary,
+                satisfied: FirstRunToasts.satisfied(vocabulary: entries),
+                padding: EdgeInsets(top: 0, leading: 20, bottom: 16, trailing: 20)
+            )
             Divider()
             boostingBar
             Divider()

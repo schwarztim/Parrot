@@ -25,6 +25,11 @@ struct ModesView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            FirstRunToastStack(
+                screen: .modes,
+                satisfied: FirstRunToasts.satisfied(modes: modes),
+                padding: EdgeInsets(top: 0, leading: 20, bottom: 16, trailing: 20)
+            )
             Divider()
             if modes.isEmpty {
                 emptyState

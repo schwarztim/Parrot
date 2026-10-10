@@ -79,14 +79,38 @@ enum FirstRunToasts {
     static func dismissing(_ id: String, from dismissed: Set<String>) -> Set<String> {
         dismissed.union([id])
     }
+
+    /// Modes tips the user already followed: a mode of their own (any key
+    /// that is not a built-in preset's), an app or website rule, a mode
+    /// shortcut.
+    static func satisfied(modes: [Mode]) -> Set<String> {
+        let presetKeys = Set(ModePresets.defaultModes.map { $0.key.lowercased() })
+        var satisfied: Set<String> = []
+        if modes.contains(where: { !presetKeys.contains($0.key.lowercased()) }) { satisfied.insert("modes.create") }
+        if modes.contains(where: { !($0.appBundleIDs ?? []).isEmpty || !$0.activationSites.isEmpty }) {
+            satisfied.insert("modes.activation")
+        }
+        if modes.contains(where: { $0.shortcut != nil }) { satisfied.insert("modes.shortcut") }
+        return satisfied
+    }
+
+    /// Vocabulary tips the user already followed: a word, a replacement.
+    static func satisfied(vocabulary: [VocabularyEntry]) -> Set<String> {
+        var satisfied: Set<String> = []
+        if vocabulary.contains(where: \.isWord) { satisfied.insert("vocabulary.firstItem") }
+        if vocabulary.contains(where: { !$0.isWord }) { satisfied.insert("vocabulary.firstReplacement") }
+        return satisfied
+    }
 }
 
 // MARK: - Views
 
-/// The stacked tips for one screen. Closing one saves its id.
+/// The stacked tips for one screen. Closing one saves its id. `padding`
+/// applies only while a tip shows, so an empty stack takes no room.
 struct FirstRunToastStack: View {
     let screen: FirstRunToast.Screen
     var satisfied: Set<String> = []
+    var padding = EdgeInsets()
 
     @Environment(AppSettings.self) private var appSettings
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -101,6 +125,7 @@ struct FirstRunToastStack: View {
                 .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
             }
         }
+        .padding(toasts.isEmpty ? EdgeInsets() : padding)
         .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85), value: toasts)
     }
 }

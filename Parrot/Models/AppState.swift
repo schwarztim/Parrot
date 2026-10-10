@@ -690,6 +690,13 @@ extension AppState: RecorderUIPresenting {
     func hideRecorder() {
         RecordingOverlayPanel.hide()
     }
+
+    /// "Choose Another" opens the Sound tab's microphone list.
+    func showLidClosedWarning() {
+        WarningModal.show(.lidClosed, onPrimary: {
+            (NSApp.delegate as? ParrotAppDelegate)?.windows?.showTab(.sound)
+        })
+    }
 }
 
 // MARK: - Errors
