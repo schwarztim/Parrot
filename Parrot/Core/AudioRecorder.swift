@@ -363,6 +363,10 @@ final class AudioRecorder {
     }
 }
 
+// MARK: - Pipeline
+
+extension AudioRecorder: AudioCapturing {}
+
 // MARK: - Errors
 
 enum AudioRecorderError: LocalizedError {
