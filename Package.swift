@@ -29,6 +29,11 @@ let package = Package(
                 .process("Resources"),
             ]
         ),
+        // Helper that Claude Code and Codex hooks run. A stub for now.
+        .executableTarget(
+            name: "parrot-agent-hook",
+            path: "AgentHook"
+        ),
         .testTarget(
             name: "ParrotTests",
             dependencies: ["Parrot"],
