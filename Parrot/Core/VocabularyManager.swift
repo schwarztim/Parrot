@@ -22,12 +22,7 @@ final class VocabularyManager {
     private let storageURL: URL
 
     static func defaultStorageURL() -> URL {
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first!
-        return appSupport
-            .appendingPathComponent("Parrot", isDirectory: true)
-            .appendingPathComponent("vocabulary.json")
+        AppPaths.defaultRoot.appendingPathComponent("vocabulary.json")
     }
 
     // MARK: - Initialization

@@ -18,10 +18,12 @@ final class AppPathsTests: XCTestCase {
         super.tearDown()
     }
 
-    func testDefaultRootIsApplicationSupportParrot() {
-        let root = AppPaths().root
+    func testProductionRootIsApplicationSupportParrot() {
+        let root = AppPaths.productionRoot
         XCTAssertEqual(root.lastPathComponent, "Parrot")
         XCTAssertEqual(root.deletingLastPathComponent().lastPathComponent, "Application Support")
+        // Inside tests the default root is a throwaway folder instead.
+        XCTAssertNotEqual(AppPaths().root, root)
     }
 
     func testLayoutUnderAnInjectedRoot() {

@@ -63,10 +63,7 @@ final class ModeManager {
 
     /// The old single-file location (`.../Parrot/modes.json`).
     static var defaultStorageURL: URL {
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first!
-        let dir = appSupport.appendingPathComponent("Parrot", isDirectory: true)
+        let dir = AppPaths.defaultRoot
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("modes.json")
     }

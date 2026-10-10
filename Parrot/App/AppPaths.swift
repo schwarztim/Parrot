@@ -25,11 +25,28 @@ struct AppPaths: Sendable, Equatable {
         self.root = root
     }
 
-    /// `~/Library/Application Support/Parrot/`.
+    /// `~/Library/Application Support/Parrot/`. Inside a test run it is a
+    /// private temporary folder instead, so no test can ever write into the
+    /// user's real recordings, history, modes or vocabulary.
     static var defaultRoot: URL {
+        isRunningTests ? testRoot : productionRoot
+    }
+
+    /// The real `~/Library/Application Support/Parrot/`, whatever process
+    /// asks. Only the app (and the agent hook helper) should open it.
+    static var productionRoot: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Parrot", isDirectory: true)
     }
+
+    /// True when XCTest is loaded into this process.
+    static let isRunningTests: Bool =
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
+
+    /// One throwaway root per test process.
+    private static let testRoot: URL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("parrot-test-root-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
 
     // MARK: - Recordings
 

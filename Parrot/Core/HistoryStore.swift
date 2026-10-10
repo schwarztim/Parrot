@@ -27,8 +27,7 @@ final class HistoryStore: @unchecked Sendable {
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     static func defaultURL() -> URL {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Parrot", isDirectory: true)
+        let dir = AppPaths.defaultRoot
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("parrot.db")
     }

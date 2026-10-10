@@ -564,7 +564,9 @@ final class HookPayloadTests: XCTestCase {
         ])
         XCTAssertEqual(paths.root.path, "/tmp/root")
         XCTAssertEqual(paths.controlDir.path, "/tmp/control")
-        XCTAssertEqual(AgentHookPaths.resolve(environment: [:]).root, AppPaths.defaultRoot)
+        // The helper runs outside tests, so its default is the real folder.
+        XCTAssertEqual(AgentHookPaths.resolve(environment: [:]).root.standardizedFileURL,
+                       AppPaths.productionRoot.standardizedFileURL)
     }
 
     func testGitBranchFromHeadAndWorktree() throws {
