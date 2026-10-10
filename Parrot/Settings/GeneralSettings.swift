@@ -75,8 +75,8 @@ final class GeneralSettings {
         didSet { store.set(menubarClickRecords, forKey: Key.menubarClickRecords) }
     }
 
-    /// "Show in Dock". Off (the default) keeps Parrot a menu bar app that
-    /// shows a Dock icon only while one of its windows is open.
+    /// "Show in Dock" (ui 3.5, default on). Off keeps Parrot a menu bar app
+    /// that shows a Dock icon only while one of its windows is open.
     var showInDock: Bool {
         didSet { store.set(showInDock, forKey: Key.showInDock) }
     }
@@ -115,7 +115,7 @@ final class GeneralSettings {
         successfulDictationCount = store.int(Key.successfulDictationCount, default: 0)
         refinementNudgeDismissed = store.bool(Key.refinementNudgeDismissed, default: false)
         menubarClickRecords = store.bool(Key.menubarClickRecords, default: false)
-        showInDock = store.bool(Key.showInDock, default: false)
+        showInDock = store.bool(Key.showInDock, default: true)
         theme = store.value(Key.theme, default: AppTheme.system)
         typingWPM = store.double(Key.typingWPM, default: Self.defaultTypingWPM)
         onboardingProgress = store.int(Key.onboardingProgress, default: 0)
