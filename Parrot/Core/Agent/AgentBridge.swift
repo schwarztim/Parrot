@@ -219,12 +219,10 @@ final class AgentBridge {
         diagLog("[Parrot:Agent] \(message.agent.rawValue) \(message.kind.rawValue) \(message.event?.rawValue ?? "") -> \(change)")
         guard change != .ignored else { return }
 
-        // Only an inbox message can carry bypass state: the CLI reports it
-        // runs in bypass mode. Bound to its process like any bypass.
-        if message.kind == .update, message.permissionMode == "bypassPermissions",
-           !isBypassed(message.sessionId), let cliPid = message.cliPid, isProcessAlive(cliPid) {
-            setBypass(true, sessionId: message.sessionId, cliPid: cliPid, agent: message.agent, project: message.project)
-        }
+        // A CLI that reports its own bypass mode only gets a note in the
+        // panel header. Parrot's bypass is granted only through its
+        // confirmation: the requests a CLI still asks about in bypass mode
+        // are the ones it wants a person to see.
         // A bypassed session's permission request is approved at once, if
         // it comes from the same CLI process.
         if message.kind == .update, message.event == .permission,

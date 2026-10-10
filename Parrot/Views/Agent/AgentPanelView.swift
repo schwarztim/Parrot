@@ -174,6 +174,11 @@ struct AgentPanelHeader: View {
                 if let title = session.title, !title.isEmpty {
                     Text(title).font(.caption).lineLimit(1)
                 }
+                if session.permissionMode == "bypassPermissions" {
+                    Label("The CLI is running in bypass mode", systemImage: "bolt.shield")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
             Spacer()
             if queued > 0 {

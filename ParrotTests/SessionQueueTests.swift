@@ -424,12 +424,18 @@ final class SessionQueueTests: XCTestCase {
         XCTAssertFalse(fixture.bridge.isBypassed("a"), "no process id, no bypass")
     }
 
-    func testCLIBypassModeShowsTheBadge() {
+    func testCLIBypassModeIsOnlyANote() async throws {
         let fixture = makeFixture()
-        var update = fixture.update(.stop, session: "a", request: "request-a1")
+        var update = fixture.update(.permission, session: "a", request: "request-a1")
         update.permissionMode = "bypassPermissions"
         fixture.bridge.ingest(update)
-        XCTAssertTrue(fixture.bridge.isBypassed("a"))
+        XCTAssertEqual(fixture.bridge.currentSession?.permissionMode, "bypassPermissions", "shown in the header")
+        XCTAssertFalse(fixture.bridge.isBypassed("a"), "Parrot's bypass needs its own confirmation")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.paths.bypassMarker(sessionId: "a").path))
+        // The request the CLI still asks about is shown, not approved.
+        await fixture.settle { false }
+        XCTAssertNil(try fixture.response(for: "request-a1"))
+        XCTAssertEqual(fixture.bridge.currentSession?.requestId, "request-a1")
     }
 
     // MARK: - Narrow Grants
