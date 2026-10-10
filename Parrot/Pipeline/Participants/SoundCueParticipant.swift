@@ -10,7 +10,7 @@ final class SoundCueParticipant: RecordingParticipant {
     }
 
     private var soundsEnabled: Bool {
-        services.settings?.soundEffectsEnabled ?? true
+        services.settings?.audio.soundEffectsEnabled ?? true
     }
 
     /// Lets the user know recording started.

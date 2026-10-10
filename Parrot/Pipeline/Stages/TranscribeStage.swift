@@ -30,7 +30,7 @@ final class TranscribeStage: DictationStage {
             throw TranscriptionError.engineNotReady
         }
 
-        let choice = services.settings?.transcriptionProvider ?? .parakeet
+        let choice = services.settings?.transcription.transcriptionProvider ?? .parakeet
         guard choice != .parakeet else {
             return try await engine.transcribe(samples)
         }
@@ -58,22 +58,26 @@ final class TranscribeStage: DictationStage {
     /// settings are incomplete.
     private func cloudTranscriber(for choice: TranscriptionProviderChoice) -> TranscriptionProvider? {
         guard let settings = services.settings else { return nil }
+        let transcription = settings.transcription
+        let refinement = settings.refinement
         switch choice {
         case .parakeet:
             return nil
         case .openAI:
-            guard !settings.openAIKey.isEmpty, !settings.openAITranscriptionModel.isEmpty else { return nil }
-            return OpenAITranscriber(apiKey: settings.openAIKey, model: settings.openAITranscriptionModel)
+            let apiKey = settings.credentials.key(for: .openAI)
+            guard !apiKey.isEmpty, !transcription.openAITranscriptionModel.isEmpty else { return nil }
+            return OpenAITranscriber(apiKey: apiKey, model: transcription.openAITranscriptionModel)
         case .azureWhisper:
-            guard !settings.azureOpenAIEndpoint.isEmpty,
-                  !settings.azureOpenAIKey.isEmpty,
-                  !settings.azureWhisperDeployment.isEmpty
+            let apiKey = settings.credentials.key(for: .azureOpenAI)
+            guard !refinement.azureOpenAIEndpoint.isEmpty,
+                  !apiKey.isEmpty,
+                  !transcription.azureWhisperDeployment.isEmpty
             else { return nil }
             return AzureWhisperTranscriber(
-                endpoint: settings.azureOpenAIEndpoint,
-                apiKey: settings.azureOpenAIKey,
-                deployment: settings.azureWhisperDeployment,
-                apiVersion: settings.azureOpenAIAPIVersion
+                endpoint: refinement.azureOpenAIEndpoint,
+                apiKey: apiKey,
+                deployment: transcription.azureWhisperDeployment,
+                apiVersion: refinement.azureOpenAIAPIVersion
             )
         }
     }

@@ -48,6 +48,34 @@ enum KeychainHelper {
         return String(data: data, encoding: .utf8)
     }
 
+    /// Retrieves a string value, telling a missing item apart from a failed
+    /// read. Returns nil only when no item exists; throws for anything else,
+    /// such as a locked keychain over ssh (errSecInteractionNotAllowed) or an
+    /// unreadable value. `load` folds both cases into nil.
+    static func read(service: String, account: String) throws -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+
+        if status == errSecItemNotFound {
+            return nil
+        }
+        guard status == errSecSuccess,
+              let data = result as? Data,
+              let value = String(data: data, encoding: .utf8)
+        else {
+            throw KeychainError.readFailed(status)
+        }
+        return value
+    }
+
     /// Deletes a value from the Keychain.
     @discardableResult
     static func delete(service: String, account: String) -> Bool {
@@ -58,4 +86,12 @@ enum KeychainHelper {
         ]
         return SecItemDelete(query as CFDictionary) == errSecSuccess
     }
+}
+
+/// A Keychain operation that did not succeed.
+enum KeychainError: Error, Equatable {
+    /// The item exists or may exist but could not be read (OSStatus).
+    case readFailed(OSStatus)
+    /// The item could not be saved.
+    case writeFailed
 }

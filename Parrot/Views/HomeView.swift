@@ -48,7 +48,7 @@ struct HomeView: View {
                     .font(.headline)
                 Spacer()
                 Button {
-                    appSettings.refinementNudgeDismissed = true
+                    appSettings.general.refinementNudgeDismissed = true
                 } label: {
                     Image(systemName: "xmark")
                         .font(.caption)
@@ -64,13 +64,13 @@ struct HomeView: View {
 
             HStack {
                 Button("Set up") {
-                    appSettings.refinementNudgeDismissed = true
+                    appSettings.general.refinementNudgeDismissed = true
                     appState.requestConfigurationTab = true
                 }
                 .buttonStyle(.borderedProminent)
 
                 Button("No thanks") {
-                    appSettings.refinementNudgeDismissed = true
+                    appSettings.general.refinementNudgeDismissed = true
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)

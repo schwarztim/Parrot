@@ -17,7 +17,7 @@ final class RefineStage: DictationStage {
 
     func run(_ session: DictationSession) async throws -> StageResult {
         guard let settings = services.settings,
-              settings.refinementEnabled || session.forceRefinement
+              settings.refinement.refinementEnabled || session.forceRefinement
         else { return .continue }
 
         do {

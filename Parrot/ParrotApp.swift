@@ -15,13 +15,10 @@ final class ParrotAppDelegate: NSObject, NSApplicationDelegate, ObservableObject
     private var mainWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        guard let appState, let appSettings else { return }
-
-        // Sync persisted onboarding flag
-        appState.hasCompletedOnboarding = appSettings.hasCompletedOnboarding
+        guard appState != nil, let appSettings else { return }
 
         DispatchQueue.main.async { [self] in
-            if !appSettings.hasCompletedOnboarding {
+            if !appSettings.general.hasCompletedOnboarding {
                 // Regular activation during onboarding so the wizard and the
                 // system TCC prompts reliably take focus.
                 NSApp.setActivationPolicy(.regular)
@@ -108,7 +105,7 @@ final class ParrotAppDelegate: NSObject, NSApplicationDelegate, ObservableObject
 
         // Once onboarding is done, become a menu-bar accessory (no Dock icon,
         // out of Cmd-Tab). The settings window still opens on demand.
-        if appSettings.hasCompletedOnboarding {
+        if appSettings.general.hasCompletedOnboarding {
             NSApp.setActivationPolicy(.accessory)
         }
 
@@ -146,7 +143,7 @@ final class ParrotAppDelegate: NSObject, NSApplicationDelegate, ObservableObject
 struct ParrotApp: App {
     @NSApplicationDelegateAdaptor private var appDelegate: ParrotAppDelegate
     @State private var appState = AppState()
-    @State private var appSettings = AppSettings()
+    @State private var appSettings: AppSettings
 
     init() {
         // Wire delegate references before applicationDidFinishLaunching.
@@ -179,7 +176,7 @@ struct ParrotApp: App {
         }
         // Flag missing permissions right in the menu bar glyph, but only once
         // onboarding is done (during onboarding the wizard owns permissions).
-        if appSettings.hasCompletedOnboarding, !appState.permissionWarnings.isEmpty {
+        if appSettings.general.hasCompletedOnboarding, !appState.permissionWarnings.isEmpty {
             return "mic.badge.xmark"
         }
         return "mic.fill"
@@ -198,7 +195,7 @@ private struct MenuBarContentView: View {
         statusSection
 
         // Permission health rows (only after onboarding, only when unhealthy).
-        if appSettings.hasCompletedOnboarding {
+        if appSettings.general.hasCompletedOnboarding {
             let warnings = appState.permissionWarnings
             if !warnings.isEmpty {
                 Divider()
@@ -217,7 +214,7 @@ private struct MenuBarContentView: View {
         // Open main window (or resume onboarding if it isn't finished).
         Button("Open Parrot...") {
             if let delegate = NSApplication.shared.delegate as? ParrotAppDelegate {
-                if appSettings.hasCompletedOnboarding {
+                if appSettings.general.hasCompletedOnboarding {
                     delegate.showMainWindow()
                 } else {
                     delegate.showOnboardingWindow()

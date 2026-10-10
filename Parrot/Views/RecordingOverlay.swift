@@ -31,8 +31,13 @@ class FloatingPanel: NSPanel {
 struct RecordingOverlayView: View {
     @Environment(AppState.self) private var appState
 
+    /// The saved window style. Classic until ParrotApp wires the settings.
+    private var windowStyle: RecordingWindowStyle {
+        appState.settings?.recorder.recordingWindowStyle ?? .classic
+    }
+
     var body: some View {
-        switch appState.recordingWindowStyle {
+        switch windowStyle {
         case .classic:
             classicOverlay
         case .mini:
@@ -239,7 +244,7 @@ enum RecordingOverlayPanel {
 
     static func show(appState: AppState) {
         hide()
-        guard appState.recordingWindowStyle != .none else { return }
+        guard (appState.settings?.recorder.recordingWindowStyle ?? .classic) != .none else { return }
 
         // Padding leaves room for the view's own shadow inside the panel.
         let hosting = NSHostingView(rootView: RecordingOverlayView().padding(12).environment(appState))
@@ -313,7 +318,12 @@ extension EnvironmentValues {
 #Preview("Mini") {
     let state = AppState()
     state.recordingState = .recording
-    state.recordingWindowStyle = .mini
+    let settings = AppSettings(
+        store: SettingsStore(defaults: UserDefaults(suiteName: "parrot.preview")!),
+        secrets: InMemorySecretStore()
+    )
+    settings.recorder.recordingWindowStyle = .mini
+    state.settings = settings
     state.recordingDuration = 12.7
     state.waveformAmplitudes = (0..<16).map { _ in Float.random(in: 0.1...0.9) }
 

@@ -16,10 +16,10 @@ struct HistoryView: View {
     ]
 
     var body: some View {
-        @Bindable var settings = appSettings
+        @Bindable var history = appSettings.history
 
         VStack(spacing: 0) {
-            header(settings: $settings)
+            header(history: $history)
             Divider()
             content
         }
@@ -36,7 +36,7 @@ struct HistoryView: View {
 
     // MARK: - Header
 
-    private func header(settings: Bindable<AppSettings>) -> some View {
+    private func header(history: Bindable<HistorySettings>) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
@@ -60,10 +60,10 @@ struct HistoryView: View {
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color(.controlBackgroundColor)))
                 .frame(maxWidth: 260)
 
-                Toggle("Save history", isOn: settings.historyEnabled)
+                Toggle("Save history", isOn: history.historyEnabled)
                     .toggleStyle(.switch)
 
-                Picker("Keep", selection: settings.historyRetentionDays) {
+                Picker("Keep", selection: history.historyRetentionDays) {
                     ForEach(retentionOptions, id: \.1) { Text($0.0).tag($0.1) }
                 }
                 .frame(maxWidth: 160)
@@ -93,7 +93,7 @@ struct HistoryView: View {
 
     @ViewBuilder
     private var content: some View {
-        if !appSettings.historyEnabled {
+        if !appSettings.history.historyEnabled {
             emptyState(
                 icon: "nosign",
                 title: "History is off",

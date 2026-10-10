@@ -19,7 +19,7 @@ final class PersistStage: DictationStage {
         guard session.outcome == .pasted || session.outcome == .copiedOnly else { return .continue }
 
         let context = session.context
-        if services.settings?.historyEnabled == true, context?.isSecureField != true {
+        if services.settings?.history.historyEnabled == true, context?.isSecureField != true {
             _ = try? services.history?.insert(
                 rawTranscript: session.rawTranscript,
                 finalText: session.text,

@@ -303,7 +303,7 @@ struct OnboardingView: View {
                     .font(.title.weight(.bold))
 
                 Text(
-                    "Parrot watches for one key: \(appState.toggleRecordingHotkey.displayName). Grant Input Monitoring, then hold the key to test it."
+                    "Parrot watches for one key: \(appSettings.hotkeys.hotkeyBinding.displayName). Grant Input Monitoring, then hold the key to test it."
                 )
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -329,7 +329,7 @@ struct OnboardingView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
 
-                    Text("Enable Parrot in Privacy & Security > Input Monitoring, then hold \(appState.toggleRecordingHotkey.displayName) to confirm.")
+                    Text("Enable Parrot in Privacy & Security > Input Monitoring, then hold \(appSettings.hotkeys.hotkeyBinding.displayName) to confirm.")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                         .multilineTextAlignment(.center)
@@ -541,7 +541,7 @@ struct OnboardingView: View {
     }
 
     private var tryItInstruction: String {
-        let key = appState.toggleRecordingHotkey.displayName
+        let key = appSettings.hotkeys.hotkeyBinding.displayName
         return "Click the box below, then hold \(key) and say: testing Parrot one two three. Let go and watch it appear."
     }
 
@@ -638,8 +638,7 @@ struct OnboardingView: View {
     }
 
     private func completeOnboarding() {
-        appState.hasCompletedOnboarding = true
-        appSettings.hasCompletedOnboarding = true
+        appSettings.general.hasCompletedOnboarding = true
         inputMonitoringTimer?.invalidate()
         inputMonitoringTimer = nil
         onComplete?()
@@ -716,7 +715,7 @@ struct OnboardingView: View {
     private func startHotkeyProbe() {
         hotkeyDetected = false
         hotkeyProbe?.stop()
-        let probe = HotkeyProbe(targetKeyCode: Int(appState.toggleRecordingHotkey.keyCode))
+        let probe = HotkeyProbe(targetKeyCode: Int(appSettings.hotkeys.hotkeyBinding.keyCode))
         probe.onDetected = {
             hotkeyDetected = true
             // A live press is the strongest proof the key is detectable.

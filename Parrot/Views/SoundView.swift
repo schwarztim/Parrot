@@ -6,8 +6,9 @@ struct SoundView: View {
 
     var body: some View {
         @Bindable var state = appState
-        // The toggles and volume persist in AppSettings across launches.
-        @Bindable var settings = appSettings
+        // The toggles, volume and microphone persist across launches.
+        @Bindable var audio = appSettings.audio
+        @Bindable var transcription = appSettings.transcription
 
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
@@ -25,7 +26,7 @@ struct SoundView: View {
                 Form {
                     // Input Device
                     Section("Input Device") {
-                        Picker("Microphone", selection: $state.selectedInputDeviceID) {
+                        Picker("Microphone", selection: $audio.selectedInputDeviceID) {
                             Text("System Default")
                                 .tag(nil as String?)
                             ForEach(state.availableInputDevices) { device in
@@ -46,7 +47,7 @@ struct SoundView: View {
 
                     // Microphone Settings
                     Section("Microphone") {
-                        Toggle("Auto Mic Volume", isOn: $settings.autoMicVolume)
+                        Toggle("Auto Mic Volume", isOn: $audio.autoMicVolume)
 
                         Text(
                             "Automatically adjusts microphone input volume for optimal recording quality. Recommended for most setups."
@@ -54,7 +55,7 @@ struct SoundView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                        Toggle("Silence Removal", isOn: $settings.silenceRemoval)
+                        Toggle("Silence Removal", isOn: $transcription.silenceRemoval)
 
                         Text(
                             "Removes silent segments from audio before processing. Reduces processing time and improves transcription accuracy."
@@ -65,7 +66,7 @@ struct SoundView: View {
 
                     // Sound Effects
                     Section("Sound Effects") {
-                        Toggle("Enable Sound Effects", isOn: $settings.soundEffectsEnabled)
+                        Toggle("Enable Sound Effects", isOn: $audio.soundEffectsEnabled)
 
                         Text(
                             "Play audio cues when recording starts, stops, and when transcription completes."
@@ -77,18 +78,18 @@ struct SoundView: View {
                             Text("Volume")
 
                             Slider(
-                                value: $settings.soundEffectsVolume,
+                                value: $audio.soundEffectsVolume,
                                 in: 0...1,
                                 step: 0.05
                             )
-                            .disabled(!settings.soundEffectsEnabled)
+                            .disabled(!audio.soundEffectsEnabled)
 
-                            Text("\(Int(settings.soundEffectsVolume * 100))%")
+                            Text("\(Int(audio.soundEffectsVolume * 100))%")
                                 .font(.callout.monospacedDigit())
                                 .foregroundStyle(.secondary)
                                 .frame(width: 40, alignment: .trailing)
                         }
-                        .opacity(settings.soundEffectsEnabled ? 1.0 : 0.5)
+                        .opacity(audio.soundEffectsEnabled ? 1.0 : 0.5)
                     }
                 }
                 .formStyle(.grouped)

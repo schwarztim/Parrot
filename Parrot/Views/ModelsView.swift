@@ -39,35 +39,35 @@ struct ModelsView: View {
     // MARK: - Transcription Provider
 
     private var transcriptionProviderCard: some View {
-        @Bindable var settings = appSettings
+        @Bindable var transcription = appSettings.transcription
 
         return GroupBox {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Transcription Provider")
                     .font(.title3.weight(.semibold))
 
-                Picker("Speech-to-Text", selection: $settings.transcriptionProvider) {
+                Picker("Speech-to-Text", selection: $transcription.transcriptionProvider) {
                     ForEach(TranscriptionProviderChoice.allCases) { choice in
                         Text(choice.displayName).tag(choice)
                     }
                 }
                 .pickerStyle(.radioGroup)
 
-                switch appSettings.transcriptionProvider {
+                switch transcription.transcriptionProvider {
                 case .parakeet:
                     Text("Runs fully on-device. No network, no API key.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
                 case .openAI:
-                    TextField("Model", text: $settings.openAITranscriptionModel)
+                    TextField("Model", text: $transcription.openAITranscriptionModel)
                         .textFieldStyle(.roundedBorder)
                     Text("whisper-1, gpt-4o-transcribe, or gpt-4o-mini-transcribe. Uses the OpenAI API key from Configuration > AI Refinement. Falls back to Parakeet on failure.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
                 case .azureWhisper:
-                    TextField("Whisper Deployment Name", text: $settings.azureWhisperDeployment)
+                    TextField("Whisper Deployment Name", text: $transcription.azureWhisperDeployment)
                         .textFieldStyle(.roundedBorder)
                     Text("Uses the Azure endpoint, API key, and API version from Configuration > AI Refinement. Falls back to Parakeet on failure.")
                         .font(.caption)

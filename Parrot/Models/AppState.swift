@@ -180,10 +180,8 @@ final class AppState {
 
     // MARK: - Settings (inline, for views that bind directly)
 
-    var recordingWindowStyle: RecordingWindowStyle = .classic
-    var toggleRecordingHotkey: HotkeyBinding = .defaultHotkey
-    var cancelRecordingHotkey: HotkeyBinding?
-    var pushToTalkHotkey: HotkeyBinding?
+    // Saved settings live in the `AppSettings` areas. This binding is not
+    // saved anywhere yet.
     var enhanceRecordingHotkey: HotkeyBinding?
 
     /// Whether Parrot is registered as a login item. The system is the source
@@ -208,7 +206,6 @@ final class AppState {
     var availableInputDevices: [AudioInputDevice] = [
         AudioInputDevice(name: "MacBook Pro Microphone", isDefault: true),
     ]
-    var selectedInputDeviceID: String?
 
     // Models
     var availableModels: [VoiceModel] = [
@@ -222,7 +219,6 @@ final class AppState {
     ]
 
     // Onboarding
-    var hasCompletedOnboarding: Bool = false
     var currentOnboardingStep: OnboardingStep = .welcome
     var microphonePermissionGranted: Bool = false
     var inputMonitoringPermissionGranted: Bool = false
@@ -272,7 +268,7 @@ final class AppState {
     // MARK: - Computed Properties
 
     var selectedInputDevice: AudioInputDevice? {
-        if let id = selectedInputDeviceID {
+        if let id = settings?.audio.selectedInputDeviceID {
             return availableInputDevices.first(where: { $0.id == id })
         }
         return availableInputDevices.first(where: { $0.isDefault })
@@ -395,7 +391,7 @@ final class AppState {
     func refreshVocabularyBoosting() {
         guard let engine = transcriptionEngine else { return }
         let entries = vocabularyEntries
-        let enabled = settings?.vocabularyBoostingEnabled ?? false
+        let enabled = settings?.vocabulary.vocabularyBoostingEnabled ?? false
         Task {
             await engine.configureVocabulary(entries: entries, enabled: enabled)
         }
@@ -503,7 +499,7 @@ final class AppState {
 
         // History store (searchable local dictation history).
         services.history = try? HistoryStore(databaseURL: HistoryStore.defaultURL())
-        if let days = settings?.historyRetentionDays, days > 0 {
+        if let days = settings?.history.historyRetentionDays, days > 0 {
             _ = try? historyStore?.pruneOlderThan(days: days)
         }
 
@@ -647,16 +643,10 @@ final class AppState {
 
     // MARK: - Hotkey Sync
 
-    /// Mirrors the saved bindings into the UI state and applies the dictation
-    /// binding to the hotkey listener (see `HotkeyCenter.apply`).
+    /// Applies the saved dictation binding to the hotkey listener (see
+    /// `HotkeyCenter.apply`). Views read the bindings from `settings.hotkeys`.
     func syncHotkeys(from settings: AppSettings) {
         guard hotkeyManager != nil else { return }
-
-        // Sync UI state from persisted settings
-        toggleRecordingHotkey = settings.hotkeyBinding
-        cancelRecordingHotkey = settings.cancelHotkeyBinding
-        pushToTalkHotkey = settings.pushToTalkBinding
-
         services.hotkeys.apply(settings)
     }
 
@@ -775,7 +765,7 @@ extension AppState: DictationControllerDelegate {
             recordingDuration = 0
             waveformAmplitudes = []
             isEnhanceMode = false
-            settings?.successfulDictationCount += 1
+            settings?.general.successfulDictationCount += 1
         case .failed(let message):
             diagLog("[Parrot:AppState] Transcription FAILED: \(message)")
             recordingState = .idle

@@ -63,7 +63,7 @@ final class TranscriptionRouter {
                 // Configure vocabulary boosting once the model is ready.
                 await engine.configureVocabulary(
                     entries: self?.vocabulary.entries ?? [],
-                    enabled: settings?.vocabularyBoostingEnabled ?? false
+                    enabled: settings?.vocabulary.vocabularyBoostingEnabled ?? false
                 )
 
                 guard let self else { return }

@@ -19,7 +19,7 @@ final class ContextCaptureParticipant: RecordingParticipant {
         let settings = services.settings
         let context = ContextSnapshotter.capture()
         session.context = context
-        services.live.destinationLabel = (settings?.destinationAwareRefinement == true) ? context.displayLabel : nil
+        services.live.destinationLabel = (settings?.refinement.destinationAwareRefinement == true) ? context.displayLabel : nil
 
         // An app-assigned mode wins, otherwise the selected mode. Applied to
         // this session only; the user's selection never changes.

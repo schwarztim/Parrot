@@ -54,7 +54,7 @@ struct VocabularyView: View {
         }
         .onChange(of: appState.vocabularyEntries) { _, _ in
             // Keep recognizer boosting in sync with vocabulary edits.
-            if appSettings.vocabularyBoostingEnabled {
+            if appSettings.vocabulary.vocabularyBoostingEnabled {
                 appState.refreshVocabularyBoosting()
             }
         }
@@ -88,10 +88,10 @@ struct VocabularyView: View {
     // MARK: - Boosting Bar
 
     private var boostingBar: some View {
-        @Bindable var settings = appSettings
+        @Bindable var vocabularySettings = appSettings.vocabulary
         return VStack(alignment: .leading, spacing: 4) {
-            Toggle("Boost these terms in the recognizer", isOn: $settings.vocabularyBoostingEnabled)
-                .onChange(of: settings.vocabularyBoostingEnabled) { _, _ in
+            Toggle("Boost these terms in the recognizer", isOn: $vocabularySettings.vocabularyBoostingEnabled)
+                .onChange(of: vocabularySettings.vocabularyBoostingEnabled) { _, _ in
                     appState.refreshVocabularyBoosting()
                 }
             Text("Biases on-device recognition toward your terms so they are transcribed correctly, not just replaced afterward. Downloads an additional recognizer model (~110M parameters) the first time you enable it.")

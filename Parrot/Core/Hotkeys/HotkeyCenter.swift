@@ -38,7 +38,7 @@ final class HotkeyCenter {
     /// Applies the saved dictation binding to the listener.
     func apply(_ settings: AppSettings) {
         guard let manager else { return }
-        let binding = settings.hotkeyBinding
+        let binding = settings.hotkeys.hotkeyBinding
 
         // Guard against broken bindings saved by the old keyCode:0 capture bug.
         // A keyboard binding with keyCode 0 and no mouse button is invalid

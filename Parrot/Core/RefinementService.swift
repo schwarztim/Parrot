@@ -76,39 +76,45 @@ enum RefinementService {
     /// Builds the client and model for the provider selected in settings.
     /// Returns nil when the selected provider is missing required configuration.
     static func makeClient(from settings: AppSettings) -> (client: RefinementClient, model: String)? {
-        switch settings.refinementProvider {
+        let refinement = settings.refinement
+        let credentials = settings.credentials
+        switch refinement.refinementProvider {
         case .localServer:
-            guard !settings.localServerBaseURL.isEmpty, !settings.localServerModel.isEmpty else { return nil }
+            guard !refinement.localServerBaseURL.isEmpty, !refinement.localServerModel.isEmpty else { return nil }
+            let apiKey = credentials.key(for: .localServer)
             let client = OpenAICompatibleClient(
-                baseURL: settings.localServerBaseURL,
-                apiKey: settings.localServerKey.isEmpty ? nil : settings.localServerKey
+                baseURL: refinement.localServerBaseURL,
+                apiKey: apiKey.isEmpty ? nil : apiKey
             )
-            return (client, settings.localServerModel)
+            return (client, refinement.localServerModel)
 
         case .openAI:
-            guard !settings.openAIKey.isEmpty, !settings.openAIModel.isEmpty else { return nil }
+            let apiKey = credentials.key(for: .openAI)
+            guard !apiKey.isEmpty, !refinement.openAIModel.isEmpty else { return nil }
             let client = OpenAICompatibleClient(
                 baseURL: "https://api.openai.com/v1",
-                apiKey: settings.openAIKey
+                apiKey: apiKey
             )
-            return (client, settings.openAIModel)
+            return (client, refinement.openAIModel)
 
         case .azureOpenAI:
-            guard !settings.azureOpenAIEndpoint.isEmpty,
-                  !settings.azureOpenAIDeployment.isEmpty,
-                  !settings.azureOpenAIKey.isEmpty
+            let apiKey = credentials.key(for: .azureOpenAI)
+            guard !refinement.azureOpenAIEndpoint.isEmpty,
+                  !refinement.azureOpenAIDeployment.isEmpty,
+                  !apiKey.isEmpty
             else { return nil }
             let client = AzureOpenAIClient(
-                endpoint: settings.azureOpenAIEndpoint,
-                apiKey: settings.azureOpenAIKey,
-                apiVersion: settings.azureOpenAIAPIVersion
+                endpoint: refinement.azureOpenAIEndpoint,
+                apiKey: apiKey,
+                apiVersion: refinement.azureOpenAIAPIVersion
             )
-            return (client, settings.azureOpenAIDeployment)
+            return (client, refinement.azureOpenAIDeployment)
 
         case .anthropic:
-            guard !settings.anthropicKey.isEmpty, !settings.anthropicModel.isEmpty else { return nil }
-            let client = AnthropicClient(apiKey: settings.anthropicKey)
-            return (client, settings.anthropicModel)
+            let apiKey = credentials.key(for: .anthropic)
+            guard !apiKey.isEmpty, !refinement.anthropicModel.isEmpty else { return nil }
+            let client = AnthropicClient(apiKey: apiKey)
+            return (client, refinement.anthropicModel)
         }
     }
 
@@ -121,8 +127,8 @@ enum RefinementService {
     /// throwaway request so it is loaded and ready by the time the user stops
     /// speaking. Only fires for local providers, to avoid billing cloud APIs.
     static func warmUpIfLocal(settings: AppSettings) {
-        guard settings.refinementEnabled,
-              settings.refinementProvider == .localServer,
+        guard settings.refinement.refinementEnabled,
+              settings.refinement.refinementProvider == .localServer,
               let (client, model) = makeClient(from: settings)
         else { return }
         Task.detached {
@@ -137,7 +143,7 @@ enum RefinementService {
     ///   - modePrompt: Optional per-mode directive override; falls back to
     ///     ``defaultDirective`` when nil or empty.
     ///   - context: Optional destination context. Redacted to metadata-only for
-    ///     cloud providers when ``AppSettings/contextLocalOnly`` is on.
+    ///     cloud providers when ``RefinementSettings/contextLocalOnly`` is on.
     ///   - settings: App settings supplying provider choice and credentials.
     /// - Throws: ``RefinementError/notConfigured`` or a provider error.
     static func refine(
@@ -152,9 +158,10 @@ enum RefinementService {
 
         // Decide what context, if any, reaches the provider.
         var effectiveContext: DictationContext?
-        if settings.destinationAwareRefinement, let context, !context.isSecureField {
-            let isCloud = settings.refinementProvider != .localServer
-            effectiveContext = (isCloud && settings.contextLocalOnly) ? context.redactedForCloud : context
+        let refinement = settings.refinement
+        if refinement.destinationAwareRefinement, let context, !context.isSecureField {
+            let isCloud = refinement.refinementProvider != .localServer
+            effectiveContext = (isCloud && refinement.contextLocalOnly) ? context.redactedForCloud : context
         }
 
         let system = systemPrompt(directive: modePrompt, context: effectiveContext)
