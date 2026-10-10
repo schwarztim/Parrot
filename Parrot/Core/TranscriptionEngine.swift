@@ -2,7 +2,11 @@ import FluidAudio
 import Foundation
 
 /// Wraps FluidAudio's AsrManager, handling model download, pre-warming, and transcription.
-final class TranscriptionEngine {
+///
+/// An actor so model preparation, boosting reconfiguration and transcription
+/// never touch the manager or the boosting session concurrently, and so the
+/// main-actor AppState can hand work to it without blocking the UI.
+actor TranscriptionEngine {
 
     // MARK: - Types
 
@@ -44,7 +48,7 @@ final class TranscriptionEngine {
     /// - Parameter progressHandler: Optional closure invoked with download
     ///   progress (0...1). Only called during actual download.
     /// - Throws: If the download or model load fails.
-    func prepareModel(progressHandler: ((Double) -> Void)? = nil) async throws {
+    func prepareModel(progressHandler: (@Sendable (Double) -> Void)? = nil) async throws {
         guard !modelsLoaded else { return }
 
         modelStatus = .downloading(progress: 0)

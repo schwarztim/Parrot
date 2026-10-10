@@ -125,6 +125,11 @@ struct AudioInputDevice: Identifiable, Equatable, Hashable {
 ///
 /// Manages all UI-observable state **and** coordinates subsystem lifecycle:
 /// hotkey triggers -> audio capture -> transcription -> text insertion.
+///
+/// Main-actor isolated: every property is UI state. Heavy work (model load,
+/// transcription, refinement, network) runs inside actors or nonisolated
+/// async functions, and the tasks that await it resume on the main actor.
+@MainActor
 @Observable
 final class AppState {
 
@@ -275,7 +280,7 @@ final class AppState {
         let permissions = PermissionsManager()
         self.permissionsManager = permissions
         Task { @MainActor in
-            await permissions.refreshPermissions()
+            permissions.refreshPermissions()
             microphonePermissionGranted = permissions.microphoneGranted
             inputMonitoringPermissionGranted = permissions.inputMonitoringGranted
             accessibilityPermissionGranted = permissions.accessibilityGranted
@@ -307,15 +312,18 @@ final class AppState {
         transcriptionEngine = engine
 
         diagLog("[Parrot:Model] Starting model download/load task...")
-        Task.detached { [weak self] in
+        // Inherits the main actor: the download, load and prewarm run inside
+        // the engine actor, and every line between awaits is back on main.
+        Task { [weak self] in
             do {
-                try await engine.prepareModel { progress in
-                    Task { @MainActor in
-                        self?.currentStatus = .downloading(progress)
-                        self?.modelDownloadProgress = progress
-                        self?.isDownloadingModel = progress < 1.0
-                        if let i = self?.availableModels.firstIndex(where: { $0.name == "Parakeet V3" }) {
-                            self?.availableModels[i].downloadProgress = progress
+                try await engine.prepareModel { [weak self] progress in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        currentStatus = .downloading(progress)
+                        modelDownloadProgress = progress
+                        isDownloadingModel = progress < 1.0
+                        if let i = availableModels.firstIndex(where: { $0.name == "Parakeet V3" }) {
+                            availableModels[i].downloadProgress = progress
                         }
                     }
                 }
@@ -329,25 +337,23 @@ final class AppState {
                     enabled: self?.settings?.vocabularyBoostingEnabled ?? false
                 )
 
-                await MainActor.run {
-                    if case .downloading = self?.currentStatus {
-                        self?.currentStatus = .idle
-                    }
-                    self?.isDownloadingModel = false
-                    if let i = self?.availableModels.firstIndex(where: { $0.name == "Parakeet V3" }) {
-                        self?.availableModels[i].isDownloaded = true
-                        self?.availableModels[i].downloadProgress = 1.0
-                    }
+                guard let self else { return }
+                if case .downloading = currentStatus {
+                    currentStatus = .idle
+                }
+                isDownloadingModel = false
+                if let i = availableModels.firstIndex(where: { $0.name == "Parakeet V3" }) {
+                    availableModels[i].isDownloaded = true
+                    availableModels[i].downloadProgress = 1.0
                 }
             } catch {
                 diagLog("[Parrot:Model] FAILED: \(error)")
-                await MainActor.run {
-                    // Allow a retry after a failed attempt.
-                    self?.modelPreparationStarted = false
-                    self?.currentStatus = .error("Model setup failed: \(error.localizedDescription)")
-                    self?.errorMessage = error.localizedDescription
-                    self?.isDownloadingModel = false
-                }
+                guard let self else { return }
+                // Allow a retry after a failed attempt.
+                modelPreparationStarted = false
+                currentStatus = .error("Model setup failed: \(error.localizedDescription)")
+                errorMessage = error.localizedDescription
+                isDownloadingModel = false
             }
         }
     }
@@ -401,7 +407,7 @@ final class AppState {
         guard let engine = transcriptionEngine else { return }
         let entries = vocabularyEntries
         let enabled = settings?.vocabularyBoostingEnabled ?? false
-        Task.detached {
+        Task {
             await engine.configureVocabulary(entries: entries, enabled: enabled)
         }
     }
@@ -456,7 +462,7 @@ final class AppState {
         // Permissions
         let permissions = PermissionsManager()
         self.permissionsManager = permissions
-        await permissions.refreshPermissions()
+        permissions.refreshPermissions()
 
         diagLog("[Parrot:Setup] Mic preflight: \(permissions.microphoneGranted)")
         diagLog("[Parrot:Setup] Accessibility: \(permissions.accessibilityGranted)")
@@ -694,13 +700,14 @@ final class AppState {
         // Warn if the recording hit the length cap and audio was dropped,
         // rather than silently truncating.
         if recorder.didReachCapacity {
-            Task { @MainActor in
-                self.showTransientError("Recording reached the 2 minute limit; the end may be cut off.")
-            }
+            showTransientError("Recording reached the 2 minute limit; the end may be cut off.")
         }
 
         let forceRefinement = isEnhanceMode
 
+        // Inherits the main actor. Transcription, refinement and the paste
+        // await engines and nonisolated network code, then resume here, so
+        // every read and write of AppState below happens on main.
         Task { [weak self] in
             guard let self else { return }
 
@@ -725,7 +732,7 @@ final class AppState {
                         )
                     } catch {
                         diagLog("[Parrot:AppState] Refinement FAILED, pasting raw transcript: \(error)")
-                        await self.showTransientError(
+                        self.showTransientError(
                             "Refinement failed, pasted raw transcript. \(error.localizedDescription)"
                         )
                     }
@@ -738,18 +745,16 @@ final class AppState {
                 let ctx = self.capturedContext
                 let modeName = (self.activeDictationMode ?? self.currentMode)?.name
 
-                await MainActor.run {
-                    self.lastTranscription = text
-                    self.recordingState = .idle
-                    self.currentStatus = .idle
-                    self.recordingDuration = 0
-                    self.waveformAmplitudes = []
-                    self.isEnhanceMode = false
-                    self.destinationLabel = nil
-                    self.activeDictationMode = nil
-                    self.capturedContext = nil
-                    self.settings?.successfulDictationCount += 1
-                }
+                self.lastTranscription = text
+                self.recordingState = .idle
+                self.currentStatus = .idle
+                self.recordingDuration = 0
+                self.waveformAmplitudes = []
+                self.isEnhanceMode = false
+                self.destinationLabel = nil
+                self.activeDictationMode = nil
+                self.capturedContext = nil
+                self.settings?.successfulDictationCount += 1
 
                 // Save to history (never for secure fields, never when disabled).
                 if self.settings?.historyEnabled == true, ctx?.isSecureField != true {
@@ -767,23 +772,21 @@ final class AppState {
                 let pasted = await TextInserter.insertText(text)
                 diagLog("[Parrot:AppState] Text inserted, pasted=\(pasted)")
                 if !pasted {
-                    await self.showTransientError(
+                    self.showTransientError(
                         "Copied to clipboard. Grant Accessibility to auto-paste (press Cmd+V to paste now)."
                     )
                 }
 
                 // Restart level monitoring.
-                await MainActor.run { self.startInputMonitoring() }
+                self.startInputMonitoring()
 
             } catch {
                 diagLog("[Parrot:AppState] Transcription FAILED: \(error)")
-                await MainActor.run {
-                    self.recordingState = .idle
-                    self.currentStatus = .error("Transcription failed: \(error.localizedDescription)")
-                    self.errorMessage = error.localizedDescription
-                    self.isEnhanceMode = false
-                    self.startInputMonitoring()
-                }
+                self.recordingState = .idle
+                self.currentStatus = .error("Transcription failed: \(error.localizedDescription)")
+                self.errorMessage = error.localizedDescription
+                self.isEnhanceMode = false
+                self.startInputMonitoring()
             }
         }
     }
@@ -806,7 +809,7 @@ final class AppState {
         }
 
         guard let cloud = cloudTranscriber(for: choice) else {
-            await showTransientError(
+            showTransientError(
                 "\(choice.displayName) is not configured, used on-device Parakeet instead."
             )
             return try await engine.transcribe(samples)
@@ -817,7 +820,7 @@ final class AppState {
         } catch {
             diagLog("[Parrot:AppState] Cloud transcription FAILED: \(error)")
             guard isModelReady else { throw error }
-            await showTransientError(
+            showTransientError(
                 "\(choice.displayName) failed, used on-device Parakeet instead. \(error.localizedDescription)"
             )
             return try await engine.transcribe(samples)
@@ -852,7 +855,6 @@ final class AppState {
 
     /// Shows a non-blocking floating error toast and records the message.
     /// Does not change `currentStatus`; the pipeline continues normally.
-    @MainActor
     private func showTransientError(_ message: String) {
         errorMessage = message
         ErrorToastPanel.show(message)
@@ -981,8 +983,11 @@ final class AppState {
         do {
             try recorder.startMonitoring()
             levelPollTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-                guard let self else { return }
-                self.inputLevel = self.audioRecorder?.currentInputLevel ?? 0
+                // Scheduled on the main run loop, so it fires on main.
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.inputLevel = self.audioRecorder?.currentInputLevel ?? 0
+                }
             }
             diagLog("[Parrot:AppState] Input monitoring started, polling at 20Hz")
         } catch {

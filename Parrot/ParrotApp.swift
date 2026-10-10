@@ -7,6 +7,7 @@ import SwiftUI
 /// SwiftUI `Window` scenes inside a `MenuBarExtra`-only app are NOT presented
 /// automatically. This delegate creates native `NSWindow`s hosting SwiftUI
 /// views directly, which is the reliable pattern for menu bar apps.
+@MainActor
 final class ParrotAppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     var appState: AppState?
     var appSettings: AppSettings?

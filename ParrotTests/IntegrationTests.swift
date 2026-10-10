@@ -136,7 +136,8 @@ final class ParakeetIntegrationTests: XCTestCase {
         var entry = VocabularyEntry(original: "git hub", replacement: "GitHub")
         entry.isEnabled = true
         await engine.configureVocabulary(entries: [entry], enabled: true)
-        XCTAssertTrue(engine.vocabularyBoostingActive, "boosting did not activate")
+        let activated = await engine.vocabularyBoostingActive
+        XCTAssertTrue(activated, "boosting did not activate")
 
         // Transcribing with boosting on runs the CTC rescoring pass; an
         // unrelated term must leave the transcript intact.
@@ -144,7 +145,8 @@ final class ParakeetIntegrationTests: XCTestCase {
         XCTAssertTrue(boosted.lowercased().contains("hello world"), "unexpected transcription: \(boosted)")
 
         await engine.configureVocabulary(entries: [entry], enabled: false)
-        XCTAssertFalse(engine.vocabularyBoostingActive)
+        let stillActive = await engine.vocabularyBoostingActive
+        XCTAssertFalse(stillActive)
     }
 
     /// Loads the bundled WAV fixture as 16kHz mono Float32 samples, the same
