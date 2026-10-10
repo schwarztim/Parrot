@@ -68,9 +68,23 @@ final class TranscriptionRouter {
         self.loadTimeout = loadTimeout
     }
 
-    /// Transcribes an audio file opened with Parrot (Open With, a file
-    /// URL). Stub: ignored until file transcription lands.
-    func openFile(_ url: URL) {}
+    /// Speaker separation for modes with "Identify speakers" on. Tests
+    /// replace it with one over a fake diarizer.
+    lazy var diarization = DiarizationService()
+
+    /// Runs a file transcription; set by whoever owns the controller.
+    /// Nil uses the app delegate's controller.
+    var fileOpener: (@MainActor (URL) -> Void)?
+
+    /// Transcribes an audio or video file opened with Parrot (Open With, a
+    /// file URL, the menu). The result goes to the clipboard and history.
+    func openFile(_ url: URL) {
+        if let fileOpener {
+            fileOpener(url)
+        } else {
+            FileTranscriber.openWithApp(url)
+        }
+    }
 
     // MARK: - Routing
 
@@ -105,6 +119,17 @@ final class TranscriptionRouter {
                 throw TranscriptionFailure.notConfigured(choice.displayName)
             }
             return CloudBatchEngine(provider: provider)
+        case .vendor(let preset):
+            let key = settings?.credentials.key(for: preset.vendor.providerID) ?? ""
+            guard !key.isEmpty else {
+                throw TranscriptionFailure.notConfigured("\(model.name) (no \(preset.vendor.displayName) API key)")
+            }
+            return CloudVendorEngine(preset: preset, apiKey: key)
+        case .fluid(let kind):
+            if let existing = engines[model.id] { return existing }
+            let made = FluidASREngine(kind: kind)
+            engines[model.id] = made
+            return made
         case .parakeet(.v3):
             return parakeetV3()
         case .parakeet(let version):
@@ -199,6 +224,26 @@ final class TranscriptionRouter {
         guard model.isOnDevice else { return }
         let engine = try engine(for: model, settings: settings)
         try await download(model, engine: engine, progress: progress)
+    }
+
+    /// True while a download of the model is running.
+    func isDownloading(_ model: VoiceModelInfo) -> Bool {
+        downloads[model.id] != nil
+    }
+
+    /// Stops a running download. Its waiters see a cancellation error.
+    func cancelDownload(_ model: VoiceModelInfo) {
+        downloads[model.id]?.cancel()
+    }
+
+    /// Unloads a model now (before its files are deleted).
+    func unloadNow(_ model: VoiceModelInfo) async {
+        guard model.isOnDevice, let engine = engines[model.id] else { return }
+        unloadTimers[model.id]?.cancel()
+        unloadTimers[model.id] = nil
+        resident.remove(model.id)
+        await engine.unload()
+        if model.id == VoiceModels.parakeetV3.id { isModelReady = false }
     }
 
     /// True when the model's files are on disk. Cloud: always.
@@ -314,6 +359,10 @@ final class TranscriptionRouter {
         let engine = try await ensureLoaded(model, settings: settings)
         guard let streaming = engine as? any StreamingTranscriptionEngine, model.supportsRealtime else {
             throw TranscriptionFailure.notConfigured("Live text for \(model.name)")
+        }
+        if !model.isOnDevice {
+            // Cloud vendors take the vocabulary as keyterms when they connect.
+            await engine.applyVocabulary(vocabulary.entries, enabled: boostingEnabled)
         }
         beginUse(model.id)
         do {

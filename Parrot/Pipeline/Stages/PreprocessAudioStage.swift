@@ -20,6 +20,21 @@ final class PreprocessAudioStage: DictationStage {
     }
 
     func run(_ session: DictationSession) async throws -> StageResult {
+        // A file run arrives without audio: decode the file first. An
+        // unreadable file ends the run with its error.
+        if session.samples.isEmpty, let url = session.sourceFileURL {
+            do {
+                let started = Date()
+                session.samples = try await AudioFileDecoder.decode(url)
+                diagLog("[Parrot:File] Decoded \(url.lastPathComponent): \(String(format: "%.1f", session.duration))s in \(String(format: "%.2f", Date().timeIntervalSince(started)))s")
+            } catch {
+                diagLog("[Parrot:File] \(error.localizedDescription)")
+                return .finish(.failed(error.localizedDescription))
+            }
+            if session.samples.isEmpty {
+                return .finish(.failed(AudioFileDecoder.DecodeError.unreadable("it holds no audio.").localizedDescription))
+            }
+        }
         guard !session.samples.isEmpty, let settings = services.settings?.transcription else {
             return .continue
         }
