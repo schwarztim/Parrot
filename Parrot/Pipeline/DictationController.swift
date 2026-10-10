@@ -196,7 +196,17 @@ final class DictationController {
     /// Runs the stages again on a history entry (for DATA). The stages read
     /// `session.source` to load audio or text. Returns nil when busy.
     func reprocess(historyID: Int64, mode: Mode?) async -> DictationSession? {
-        await runOffline(DictationSession(trigger: .menu, mode: mode, source: .reprocess(historyID)))
+        let session = DictationSession(trigger: .menu, mode: mode, source: .reprocess(historyID))
+        // The saved audio when there is any; otherwise the saved raw text,
+        // which TranscribeStage passes through untouched.
+        if let input = services.recordings.reprocessInput(historyID: historyID) {
+            session.samples = input.samples
+            if input.samples.isEmpty {
+                session.rawTranscript = input.rawTranscript
+                session.text = input.rawTranscript
+            }
+        }
+        return await runOffline(session)
     }
 
     /// Runs the stages on an audio file (for ASR.2). The stages read

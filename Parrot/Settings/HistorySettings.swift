@@ -45,7 +45,7 @@ final class HistorySettings {
 
     init(store: SettingsStore, secrets: SecretStore? = nil) {
         historyEnabled = store.bool(Key.historyEnabled, default: true)
-        historyRetentionDays = store.int(Key.historyRetentionDays, default: 30)
+        historyRetentionDays = store.int(Key.historyRetentionDays, default: 0)
         savePromptContext = store.bool(Key.savePromptContext, default: false)
         self.store = store
     }

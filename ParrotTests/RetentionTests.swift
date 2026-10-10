@@ -55,7 +55,7 @@ final class RetentionTests: XCTestCase {
         XCTAssertEqual(RetentionOption.allCases.map(\.label),
                        ["Forever", "1 day", "1 week", "2 weeks", "1 month", "6 months", "1 year"])
         XCTAssertEqual(RetentionOption.allCases.map(\.days), [0, 1, 7, 14, 30, 180, 365])
-        XCTAssertEqual(makeSettings().history.historyRetentionDays, 30, "existing default kept: 1 month")
+        XCTAssertEqual(makeSettings().history.historyRetentionDays, 0, "spec default: Forever")
     }
 
     func testLegacyValueStaysSelectable() {

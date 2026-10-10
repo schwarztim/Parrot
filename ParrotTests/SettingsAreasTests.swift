@@ -90,7 +90,7 @@ final class SettingsAreasTests: XCTestCase {
         XCTAssertTrue(settings.credentials.unreadable.isEmpty)
 
         XCTAssertTrue(settings.history.historyEnabled)
-        XCTAssertEqual(settings.history.historyRetentionDays, 30)
+        XCTAssertEqual(settings.history.historyRetentionDays, 0, "Spec: keep history forever by default")
 
         XCTAssertFalse(settings.vocabulary.vocabularyBoostingEnabled)
 
