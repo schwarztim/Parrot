@@ -29,6 +29,10 @@ final class TranscriptionRouter {
         self.vocabulary = vocabulary
     }
 
+    /// Transcribes an audio file opened with Parrot (Open With, a file
+    /// URL). Stub: ignored until file transcription lands.
+    func openFile(_ url: URL) {}
+
     /// Downloads and loads the Parakeet model in the background, reporting
     /// progress through `onEvent`. Idempotent: safe to call from the
     /// onboarding Welcome step (to start early) and again from setup. A

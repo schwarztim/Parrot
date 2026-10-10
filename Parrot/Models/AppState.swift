@@ -551,6 +551,9 @@ final class AppState {
         diagLog("[Parrot:Setup] Starting HotkeyManager")
         services.hotkeys.start()
 
+        // The service slots that have no setup above start here.
+        services.startServices()
+
         // Post-setup: log the full state so we can diagnose issues from the log alone.
         diagLog("[Parrot:Setup] === SETUP COMPLETE ===")
         diagLog("[Parrot:Setup] Model ready: \(isModelReady)")
