@@ -33,7 +33,7 @@ fi
 echo "Building..."
 swift build -c debug 2>&1 | grep -E "^(Building|Build|error:)" || true
 
-if [ ! -f "$BUILD_DIR/$BINARY_NAME" ]; then
+if [ ! -f "$BUILD_DIR/$BINARY_NAME" ] || [ ! -f "$BUILD_DIR/parrot-agent-hook" ]; then
     echo "✗ Build failed"
     exit 1
 fi
@@ -46,6 +46,8 @@ sleep 0.3
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$BUILD_DIR/$BINARY_NAME" "$APP_DIR/Contents/MacOS/$BINARY_NAME"
+# The agent hook helper ships next to the app binary; AgentInstaller looks there.
+cp "$BUILD_DIR/parrot-agent-hook" "$APP_DIR/Contents/MacOS/parrot-agent-hook"
 
 # App icon
 if [ -f "$APP_ICON" ]; then
@@ -73,6 +75,10 @@ cat > "$APP_DIR/Contents/Info.plist" << PLIST
     <false/>
     <key>NSMicrophoneUsageDescription</key>
     <string>Parrot needs microphone access to record your voice for transcription.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Parrot uses Apple Events to pause Music and Spotify while you dictate and to run the scripts you attach to modes.</string>
+    <key>NSContactsUsageDescription</key>
+    <string>Parrot can include your name, email and phone from your Contacts card when a mode asks for it, so the AI can sign messages for you.</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>
@@ -84,17 +90,47 @@ cat > "$APP_DIR/Contents/Info.plist" << PLIST
             </array>
         </dict>
     </array>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Audio Files</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.audio</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Video Files</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.movie</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST
 
-# Sign. Parrot is a single statically linked binary (no nested frameworks),
-# so --deep (deprecated) is unnecessary; sign the bundle directly.
+# Sign. No nested frameworks, so --deep (deprecated) is unnecessary: sign the
+# agent hook helper first (no entitlements), then the bundle.
 echo "Signing..."
+HOOK="$APP_DIR/Contents/MacOS/parrot-agent-hook"
 if [ "$IDENTITY" = "-" ]; then
+    codesign --force --sign - --identifier "$BUNDLE_ID.agent-hook" "$HOOK"
     codesign --force --sign - --identifier "$BUNDLE_ID" \
         --entitlements "$ENTITLEMENTS" "$APP_DIR"
 else
+    codesign --force --sign "$IDENTITY" $SIGN_OPTS --identifier "$BUNDLE_ID.agent-hook" "$HOOK"
     codesign --force --sign "$IDENTITY" $SIGN_OPTS \
         --entitlements "$ENTITLEMENTS" "$APP_DIR"
 fi

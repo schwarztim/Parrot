@@ -1,40 +1,179 @@
 import SwiftUI
 
+/// The landing page (ui 3.2): start recording, the current mode, shortcuts
+/// and microphone rows, first-run tips and the stats panel. [UI]
 struct HomeView: View {
+    /// Shown in the sidebar (see SidebarTab.isAvailable).
+    static let isReady = true
+
     @Environment(AppState.self) private var appState
     @Environment(AppSettings.self) private var appSettings
 
-    var body: some View {
-        VStack(spacing: 0) {
-            Spacer()
+    @State private var showsMicPicker = false
 
-            VStack(spacing: 32) {
-                // App Icon / Status Icon
-                statusIcon
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                header
 
                 // One-time AI Refinement discovery nudge.
                 if appSettings.shouldShowRefinementNudge {
                     refinementNudge
                 }
 
-                // Current Mode
-                currentModeSection
+                FirstRunToastStack(screen: .home, satisfied: satisfiedToasts)
 
-                // App State
-                appStateIndicator
+                rows
 
-                // Microphone Status
-                microphoneStatusSection
-
-                // Quick Start
-                quickStartSection
+                StatsPanelView()
             }
-            .frame(maxWidth: 400)
-
-            Spacer()
+            .padding(24)
+            .frame(maxWidth: 560)
+            .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.windowBackgroundColor))
+    }
+
+    // MARK: - Header
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(statusColor.opacity(0.15))
+                    .frame(width: 44, height: 44)
+                Image(systemName: statusIconName)
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundStyle(statusColor)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Welcome back")
+                    .font(.title2.weight(.semibold))
+                Text(statusLabel)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var statusIconName: String {
+        switch appState.recordingState {
+        case .idle: return "waveform"
+        case .recording: return "mic.fill"
+        case .processing: return "brain"
+        }
+    }
+
+    private var statusColor: Color {
+        switch appState.recordingState {
+        case .idle: return .green
+        case .recording: return .red
+        case .processing: return .orange
+        }
+    }
+
+    private var statusLabel: String {
+        switch appState.recordingState {
+        case .idle: return "Ready to record."
+        case .recording: return "Recording..."
+        case .processing: return "Processing audio..."
+        }
+    }
+
+    // MARK: - Rows
+
+    private var rows: some View {
+        let hotkeys = appSettings.hotkeys
+        let pushToTalk = hotkeys.shortcut(for: .pushToTalk)
+        let toggle = hotkeys.shortcut(for: .toggleRecording)
+        let startKey = toggle.isEmpty ? pushToTalk : toggle
+        let devices = appState.services.devices
+
+        return VStack(spacing: 0) {
+            HomeRow(
+                systemImage: "mic.circle.fill",
+                title: "Start recording",
+                caption: "Turn your voice to text with a single click.",
+                action: { appState.toggleDictation(trigger: .menu) }
+            ) {
+                if !startKey.isEmpty {
+                    ShortcutKeycaps(shortcut: startKey)
+                }
+            }
+            Divider().padding(.leading, 44)
+            HomeRow(
+                systemImage: "square.stack.3d.up",
+                title: "\(appState.currentMode?.name ?? "Default") mode",
+                caption: "Create a mode or change how Parrot writes.",
+                action: { appState.navigation.request(.modes) }
+            )
+            Divider().padding(.leading, 44)
+            HomeRow(
+                systemImage: "keyboard",
+                title: "Customize your shortcuts",
+                caption: pushToTalk.isEmpty ? "No push-to-talk key yet." : "Hold \(pushToTalk.displayName) to talk.",
+                action: { appState.navigation.request(.shortcuts) }
+            ) {
+                if !pushToTalk.isEmpty {
+                    ShortcutKeycaps(shortcut: pushToTalk)
+                }
+            }
+            Divider().padding(.leading, 44)
+            HomeRow(
+                systemImage: micIconName,
+                title: devices.activeDevice?.name ?? "Microphone",
+                caption: micCaption,
+                action: { showsMicPicker = true }
+            ) {
+                Image(systemName: "chevron.down")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .popover(isPresented: $showsMicPicker, arrowEdge: .bottom) {
+                DevicePickerView(devices: devices) { showsMicPicker = false }
+                    .padding(12)
+                    .frame(width: 300)
+            }
+            Divider().padding(.leading, 44)
+            HomeRow(
+                systemImage: "text.book.closed",
+                title: "Add vocabulary",
+                caption: "Teach Parrot names and terms it should spell right.",
+                action: { appState.navigation.request(.vocabulary) }
+            )
+        }
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color(.controlBackgroundColor)))
+    }
+
+    private var micIconName: String {
+        switch appState.microphoneStatus {
+        case .connected: return "mic.fill"
+        case .disconnected: return "mic.slash"
+        case .permissionDenied: return "mic.slash.fill"
+        case .permissionNotDetermined: return "mic.badge.xmark"
+        }
+    }
+
+    private var micCaption: String {
+        switch appState.microphoneStatus {
+        case .connected:
+            return appState.services.devices.followsSystemDefault ? "Following the system default." : "Pinned microphone."
+        case .disconnected:
+            return "No microphone connected."
+        case .permissionDenied:
+            return "Microphone access is off. Allow it in System Settings."
+        case .permissionNotDetermined:
+            return "Parrot will ask for microphone access on first use."
+        }
+    }
+
+    /// Tips whose suggestion the user already followed.
+    private var satisfiedToasts: Set<String> {
+        var satisfied: Set<String> = []
+        if appSettings.general.successfulDictationCount > 0 { satisfied.insert("home.firstDictation") }
+        if appSettings.general.typingWPM != GeneralSettings.defaultTypingWPM { satisfied.insert("home.typingTest") }
+        if appSettings.recorder.recordingWindowStyle == .mini { satisfied.insert("home.miniRecorder") }
+        return satisfied
     }
 
     // MARK: - Refinement Nudge
@@ -48,7 +187,7 @@ struct HomeView: View {
                     .font(.headline)
                 Spacer()
                 Button {
-                    appSettings.refinementNudgeDismissed = true
+                    appSettings.general.refinementNudgeDismissed = true
                 } label: {
                     Image(systemName: "xmark")
                         .font(.caption)
@@ -64,13 +203,14 @@ struct HomeView: View {
 
             HStack {
                 Button("Set up") {
-                    appSettings.refinementNudgeDismissed = true
-                    appState.requestConfigurationTab = true
+                    appSettings.general.refinementNudgeDismissed = true
+                    appState.navigation.modelsSegment = .language
+                    appState.navigation.request(.models)
                 }
                 .buttonStyle(.borderedProminent)
 
                 Button("No thanks") {
-                    appSettings.refinementNudgeDismissed = true
+                    appSettings.general.refinementNudgeDismissed = true
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
@@ -86,175 +226,52 @@ struct HomeView: View {
                 .strokeBorder(Color.purple.opacity(0.3), lineWidth: 1)
         )
     }
+}
 
-    // MARK: - Status Icon
+// MARK: - Row
 
-    private var statusIcon: some View {
-        ZStack {
-            Circle()
-                .fill(statusColor.opacity(0.15))
-                .frame(width: 80, height: 80)
+/// One Home action row: icon, title, caption and an optional trailing view.
+private struct HomeRow<Trailing: View>: View {
+    let systemImage: String
+    let title: String
+    let caption: String
+    let action: () -> Void
+    @ViewBuilder var trailing: () -> Trailing
 
-            Image(systemName: statusIconName)
-                .font(.system(size: 32, weight: .medium))
-                .foregroundStyle(statusColor)
-        }
-    }
+    @State private var isHovered = false
 
-    private var statusIconName: String {
-        switch appState.recordingState {
-        case .idle: return "waveform"
-        case .recording: return "mic.fill"
-        case .processing: return "brain"
-        }
-    }
-
-    private var statusColor: Color {
-        switch appState.recordingState {
-        case .idle: return .secondary
-        case .recording: return .red
-        case .processing: return .orange
-        }
-    }
-
-    // MARK: - Current Mode
-
-    private var currentModeSection: some View {
-        VStack(spacing: 6) {
-            Text("Current Mode")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: 8, height: 8)
-
-                Text(appState.currentMode?.name ?? "None")
-                    .font(.title2.weight(.semibold))
-            }
-        }
-    }
-
-    // MARK: - App State Indicator
-
-    private var appStateIndicator: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(appStateColor)
-                .frame(width: 8, height: 8)
-
-            Text(appStateLabel)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color(.controlBackgroundColor))
-        )
-    }
-
-    private var appStateLabel: String {
-        switch appState.recordingState {
-        case .idle: return "Idle. Ready to record."
-        case .recording: return "Recording..."
-        case .processing: return "Processing audio..."
-        }
-    }
-
-    private var appStateColor: Color {
-        switch appState.recordingState {
-        case .idle: return .green
-        case .recording: return .red
-        case .processing: return .orange
-        }
-    }
-
-    // MARK: - Microphone Status
-
-    private var microphoneStatusSection: some View {
-        HStack(spacing: 8) {
-            Image(systemName: micIconName)
-                .foregroundStyle(micStatusColor)
-                .font(.callout)
-
-            Text(appState.microphoneStatus.rawValue)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var micIconName: String {
-        switch appState.microphoneStatus {
-        case .connected: return "mic.fill"
-        case .disconnected: return "mic.slash"
-        case .permissionDenied: return "mic.slash.fill"
-        case .permissionNotDetermined: return "mic.badge.xmark"
-        }
-    }
-
-    private var micStatusColor: Color {
-        switch appState.microphoneStatus {
-        case .connected: return .green
-        case .disconnected: return .orange
-        case .permissionDenied: return .red
-        case .permissionNotDetermined: return .secondary
-        }
-    }
-
-    // MARK: - Quick Start
-
-    private var quickStartSection: some View {
-        VStack(spacing: 12) {
-            Divider()
-                .padding(.horizontal, 20)
-
-            VStack(spacing: 8) {
-                Text("Quick Start")
-                    .font(.headline)
-
-                VStack(spacing: 4) {
-                    instructionRow(
-                        key: "Right Option",
-                        action: "Hold to record (push to talk)"
-                    )
-                    instructionRow(
-                        key: "Right Option",
-                        action: "Tap to toggle recording"
-                    )
-                    instructionRow(
-                        key: "Esc",
-                        action: "Cancel recording"
-                    )
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.title3)
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 24)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.callout.weight(.medium))
+                        .lineLimit(1)
+                    Text(caption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
+                Spacer(minLength: 8)
+                trailing()
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(isHovered ? Color.primary.opacity(0.05) : Color.clear)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
     }
+}
 
-    private func instructionRow(key: String, action: String) -> some View {
-        HStack(spacing: 8) {
-            Text(key)
-                .font(.system(.callout, design: .rounded, weight: .medium))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(Color(.controlBackgroundColor))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 5)
-                        .strokeBorder(Color(.separatorColor), lineWidth: 0.5)
-                )
-
-            Text(action)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            Spacer()
-        }
-        .frame(maxWidth: 320)
+private extension HomeRow where Trailing == EmptyView {
+    init(systemImage: String, title: String, caption: String, action: @escaping () -> Void) {
+        self.init(systemImage: systemImage, title: title, caption: caption, action: action, trailing: { EmptyView() })
     }
 }
 
@@ -262,5 +279,5 @@ struct HomeView: View {
     HomeView()
         .environment(AppState())
         .environment(AppSettings())
-        .frame(width: 500, height: 500)
+        .frame(width: 600, height: 700)
 }

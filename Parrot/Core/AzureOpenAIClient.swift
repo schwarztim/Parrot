@@ -15,8 +15,19 @@ struct AzureOpenAIClient: RefinementClient {
     /// Dated data-plane API version. 2024-10-21 is the latest GA release.
     let apiVersion: String
     var timeoutInterval: TimeInterval = 30
+    /// How requests are sent; tests pass canned replies.
+    var transport: any HTTPTransport = URLSessionTransport()
 
     func refine(_ text: String, system: String, model: String) async throws -> String {
+        let request = try makeRequest(text, system: system, model: model)
+        let (data, response) = try await transport.send(request)
+        return try ChatCompletionResponse.content(
+            from: data, statusCode: response.statusCode, errorMessage: Self.decodeErrorMessage
+        )
+    }
+
+    /// The request `refine` sends.
+    func makeRequest(_ text: String, system: String, model: String) throws -> URLRequest {
         let url = try Self.chatURL(endpoint: endpoint, deployment: model, apiVersion: apiVersion)
 
         var request = URLRequest(url: url)
@@ -33,30 +44,13 @@ struct AzureOpenAIClient: RefinementClient {
             ]
         )
         request.httpBody = try JSONEncoder().encode(body)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw RefinementError.invalidResponse
-        }
-
-        guard (200...299).contains(httpResponse.statusCode) else {
-            throw RefinementError.providerError(
-                statusCode: httpResponse.statusCode,
-                message: Self.decodeErrorMessage(from: data)
-            )
-        }
-
-        let completion = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
-        guard let content = completion.choices.first?.message.content, !content.isEmpty else {
-            throw RefinementError.emptyResponse
-        }
-        return content
+        return request
     }
 
     static func chatURL(endpoint: String, deployment: String, apiVersion: String) throws -> URL {
         let base = endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let urlString = "\(base)/openai/deployments/\(deployment)/chat/completions?api-version=\(apiVersion)"
-        guard let url = URL(string: urlString) else {
+        guard let url = URL(string: urlString), url.scheme != nil else {
             throw RefinementError.invalidEndpoint(urlString)
         }
         return url

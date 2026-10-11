@@ -5,6 +5,10 @@ import CoreGraphics
 ///
 /// The text is placed on the general pasteboard and left there after pasting,
 /// so the dictation survives even if the target app rejects the paste.
+///
+/// Legacy one-shot path kept for existing callers. Dictations go through
+/// `OutputService` (DeliverStage), which adds clipboard restore, menu-action
+/// paste, layout-aware Cmd+V and typing.
 final class TextInserter {
 
     // MARK: - Public API

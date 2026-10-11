@@ -1,189 +1,207 @@
 import AppKit
 import SwiftUI
 
-struct OnboardingView: View {
-    @Environment(AppState.self) private var appState
-    @Environment(AppSettings.self) private var appSettings
-    @State private var currentStep: OnboardingStep = .welcome
-    @State private var inputMonitoringTimer: Timer?
-    @State private var accessibilityTimer: Timer?
-    @State private var scratchpadText: String = ""
-    @State private var hotkeyProbe: HotkeyProbe?
-    @State private var hotkeyDetected = false
+// MARK: - Flow
 
-    /// Called when the user completes onboarding. The host (AppDelegate)
-    /// uses this to close the onboarding window and show the main window.
-    var onComplete: (() -> Void)?
+/// The onboarding pages, in order (ui 4). The raw value is what
+/// `GeneralSettings.onboardingProgress` saves, so a relaunch resumes on the
+/// same page. Parrot has no paywall page.
+enum OnboardingPage: Int, CaseIterable {
+    case welcome
+    case permissions
+    case microphone
+    case model
+    case tryIt
 
-    private let totalSteps = OnboardingStep.allCases.count
-
-    var body: some View {
-        VStack(spacing: 0) {
-
-            // Progress Bar
-            progressBar
-
-            // Content
-            VStack {
-                Spacer()
-
-                Group {
-                    switch currentStep {
-                    case .welcome:
-                        welcomeStep
-                    case .microphonePermission:
-                        microphoneStep
-                    case .inputMonitoring:
-                        inputMonitoringStep
-                    case .accessibility:
-                        accessibilityStep
-                    case .modelDownload:
-                        modelDownloadStep
-                    case .tryIt:
-                        tryItStep
-                    }
-                }
-                .transition(.asymmetric(
-                    insertion: .move(edge: .trailing).combined(with: .opacity),
-                    removal: .move(edge: .leading).combined(with: .opacity)
-                ))
-
-                Spacer()
-
-                // Navigation
-                navigationButtons
-            }
-            .padding(40)
-        }
-        .frame(width: 520, height: 480)
-        .background(Color(.windowBackgroundColor))
-        .animation(.easeInOut(duration: 0.3), value: currentStep)
-        .onAppear {
-            // Ensure PermissionsManager is available for permission steps.
-            if appState.permissionsManager == nil {
-                appState.initPermissionsManager()
-            }
-            // Start the ~800 MB model download now so it is ready (or nearly
-            // so) by the time the user reaches the Model step.
-            appState.beginModelPreparation()
-            configureStep(currentStep)
-        }
-        .onChange(of: currentStep) { _, newStep in
-            configureStep(newStep)
-        }
-        .onDisappear {
-            inputMonitoringTimer?.invalidate()
-            inputMonitoringTimer = nil
-            accessibilityTimer?.invalidate()
-            accessibilityTimer = nil
-            appState.stopInputMonitoring()
-            hotkeyProbe?.stop()
-            hotkeyProbe = nil
-        }
-    }
-
-    // MARK: - Progress Bar
-
-    private var progressBar: some View {
-        HStack(spacing: 8) {
-            ForEach(OnboardingStep.allCases, id: \.rawValue) { step in
-                stepIndicator(for: step)
-            }
-        }
-        .padding(.horizontal, 40)
-        .padding(.top, 24)
-    }
-
-    private func stepIndicator(for step: OnboardingStep) -> some View {
-        VStack(spacing: 6) {
-            ZStack {
-                Circle()
-                    .fill(stepColor(for: step))
-                    .frame(width: 28, height: 28)
-
-                if isStepComplete(step) {
-                    Image(systemName: "checkmark")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.white)
-                } else {
-                    Text("\(step.rawValue + 1)")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(
-                            step == currentStep ? .white : .secondary
-                        )
-                }
-            }
-
-            Text(stepLabel(for: step))
-                .font(.system(size: 10))
-                .foregroundStyle(
-                    step == currentStep ? .primary : .secondary
-                )
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private func stepColor(for step: OnboardingStep) -> Color {
-        if isStepComplete(step) {
-            return .green
-        } else if step == currentStep {
-            return .accentColor
-        } else {
-            return Color(.controlBackgroundColor)
-        }
-    }
-
-    private func isStepComplete(_ step: OnboardingStep) -> Bool {
-        switch step {
-        case .welcome:
-            return currentStep.rawValue > OnboardingStep.welcome.rawValue
-        case .microphonePermission:
-            return appState.microphonePermissionGranted
-        case .inputMonitoring:
-            return appState.inputMonitoringPermissionGranted
-        case .accessibility:
-            return appState.accessibilityPermissionGranted
-        case .modelDownload:
-            return appState.isModelReady
-        case .tryIt:
-            return !scratchpadText.isEmpty
-        }
-    }
-
-    private func stepLabel(for step: OnboardingStep) -> String {
-        switch step {
+    var label: String {
+        switch self {
         case .welcome: return "Welcome"
-        case .microphonePermission: return "Microphone"
-        case .inputMonitoring: return "Hotkey"
-        case .accessibility: return "Paste"
-        case .modelDownload: return "Model"
+        case .permissions: return "Permissions"
+        case .microphone: return "Microphone"
+        case .model: return "Model"
         case .tryIt: return "Try it"
         }
     }
 
-    // MARK: - Step 1: Welcome
+    /// The page saved `progress` points at, clamped into range.
+    static func resumed(from progress: Int) -> OnboardingPage {
+        let last = allCases.count - 1
+        return OnboardingPage(rawValue: min(max(progress, 0), last)) ?? .welcome
+    }
 
-    private var welcomeStep: some View {
-        VStack(spacing: 24) {
-            // App Icon (real bundle icon when available, gradient glyph otherwise)
+    /// The next page, or self on the last page.
+    var next: OnboardingPage { OnboardingPage(rawValue: rawValue + 1) ?? self }
+
+    /// The previous page, or self on the first page.
+    var previous: OnboardingPage { OnboardingPage(rawValue: rawValue - 1) ?? self }
+
+    var isLast: Bool { self == Self.allCases.last }
+
+    /// Share of the flow done when this page shows (0 on Welcome, 1 on the
+    /// last page).
+    var fraction: Double { Double(rawValue) / Double(Self.allCases.count - 1) }
+}
+
+/// Pure onboarding rules: missing permissions, push-to-talk presets and
+/// completion. [UI]
+enum OnboardingFlow {
+
+    /// A one-tap push-to-talk choice on the Try it page.
+    struct Preset: Identifiable, Equatable {
+        let name: String
+        let shortcut: Shortcut
+        var id: String { name }
+    }
+
+    static let presets: [Preset] = [
+        Preset(name: "Right Command", shortcut: .key(0x36)),
+        Preset(name: "Right Option", shortcut: .key(0x3D)),
+        Preset(name: "Fn", shortcut: .key(Shortcut.functionKeyCode)),
+    ]
+
+    /// The preset matching `shortcut`, or nil for a custom key.
+    static func preset(matching shortcut: Shortcut) -> Preset? {
+        presets.first { $0.shortcut == shortcut }
+    }
+
+    /// Names of the permissions still missing, in page order.
+    static func missingPermissions(microphone: Bool, accessibility: Bool, inputMonitoring: Bool) -> [String] {
+        var missing: [String] = []
+        if !microphone { missing.append("Microphone") }
+        if !accessibility { missing.append("Accessibility") }
+        if !inputMonitoring { missing.append("Input Monitoring") }
+        return missing
+    }
+
+    /// Marks onboarding done and clears the saved page, so running it again
+    /// later starts at Welcome.
+    static func complete(_ general: GeneralSettings) {
+        general.hasCompletedOnboarding = true
+        general.onboardingProgress = 0
+    }
+}
+
+// MARK: - View
+
+/// The onboarding window: Welcome, Permissions, Microphone test, Local or
+/// Cloud, and Try it, with a progress bar and resumable progress. [UI]
+struct OnboardingView: View {
+    @Environment(AppState.self) private var appState
+    @Environment(AppSettings.self) private var appSettings
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    @State private var page: OnboardingPage = .welcome
+    @State private var permissionTimer: Timer?
+    @State private var pendingWarning: WarningState?
+    @State private var levelHistory: [Float] = []
+    @State private var scratchpadText = ""
+    @State private var customShortcut: Shortcut?
+
+    /// Called when the user completes onboarding. The host (WindowManager)
+    /// closes the onboarding window and shows the main window.
+    var onComplete: (() -> Void)?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            progressBar
+
+            VStack {
+                Spacer(minLength: 0)
+                content
+                    .transition(reduceMotion ? .opacity : .asymmetric(
+                        insertion: .move(edge: .trailing).combined(with: .opacity),
+                        removal: .move(edge: .leading).combined(with: .opacity)
+                    ))
+                    .id(page)
+                Spacer(minLength: 0)
+                navigationButtons
+            }
+            .padding(.horizontal, 40)
+            .padding(.vertical, 28)
+        }
+        .frame(width: 560, height: 540)
+        .background(Color(.windowBackgroundColor))
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: page)
+        .warningModal($pendingWarning) { _ in
+            page = page.next
+        }
+        .onAppear {
+            if appState.permissionsManager == nil {
+                appState.initPermissionsManager()
+            }
+            // Start the model download now so it is ready (or nearly so) by
+            // the time the user reaches the Model page.
+            appState.beginModelPreparation()
+            page = OnboardingPage.resumed(from: appSettings.general.onboardingProgress)
+            enter(page)
+        }
+        .onChange(of: page) { old, new in
+            appSettings.general.onboardingProgress = new.rawValue
+            leave(old)
+            enter(new)
+        }
+        .onChange(of: appState.inputLevel) { _, level in
+            levelHistory.append(level)
+            if levelHistory.count > 32 { levelHistory.removeFirst(levelHistory.count - 32) }
+        }
+        .onDisappear {
+            leave(page)
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch page {
+        case .welcome: welcomePage
+        case .permissions: permissionsPage
+        case .microphone: microphonePage
+        case .model: modelPage
+        case .tryIt: tryItPage
+        }
+    }
+
+    // MARK: - Progress
+
+    private var progressBar: some View {
+        VStack(spacing: 6) {
+            ProgressView(value: page.fraction)
+                .progressViewStyle(.linear)
+            HStack {
+                ForEach(OnboardingPage.allCases, id: \.rawValue) { item in
+                    Text(item.label)
+                        .font(.system(size: 10, weight: item == page ? .semibold : .regular))
+                        .foregroundStyle(item == page ? .primary : .secondary)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+        }
+        .padding(.horizontal, 40)
+        .padding(.top, 28)
+    }
+
+    // MARK: - Welcome
+
+    private var welcomePage: some View {
+        VStack(spacing: 22) {
             appIconView
 
             VStack(spacing: 8) {
                 Text("Welcome to Parrot")
                     .font(.largeTitle.weight(.bold))
-
-                Text("Fast, private voice-to-text powered by on-device AI.")
+                Text("Let's get you set up to dictate anywhere on your Mac.")
                     .font(.title3)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                Text("Estimated time: under 2 minutes")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                featureRow(icon: "mic.fill", text: "Record with a keyboard shortcut")
-                featureRow(icon: "cpu", text: "Transcribe locally with neural models")
-                featureRow(icon: "lock.shield", text: "Your audio never leaves your Mac")
+                featureRow(icon: "mic.fill", text: "Hold a key, speak, and let go")
+                featureRow(icon: "cpu", text: "Transcribe on your Mac or in the cloud")
+                featureRow(icon: "lock.shield", text: "Local mode keeps your audio on this Mac")
             }
-            .padding(.top, 8)
         }
     }
 
@@ -194,21 +212,14 @@ struct OnboardingView: View {
         if let icon = NSApp.applicationIconImage {
             Image(nsImage: icon)
                 .resizable()
-                .frame(width: 96, height: 96)
+                .frame(width: 88, height: 88)
         } else {
             ZStack {
-                RoundedRectangle(cornerRadius: 24)
-                    .fill(
-                        LinearGradient(
-                            colors: [Color.green, Color.teal],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 96, height: 96)
-
+                RoundedRectangle(cornerRadius: 22)
+                    .fill(LinearGradient(colors: [.green, .teal], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .frame(width: 88, height: 88)
                 Image(systemName: "waveform")
-                    .font(.system(size: 40, weight: .medium))
+                    .font(.system(size: 38, weight: .medium))
                     .foregroundStyle(.white)
             }
         }
@@ -217,351 +228,301 @@ struct OnboardingView: View {
     private func featureRow(icon: String, text: String) -> some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
-                .font(.body)
                 .foregroundColor(.accentColor)
                 .frame(width: 24)
-
             Text(text)
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
     }
 
-    // MARK: - Step 2: Microphone Permission
+    // MARK: - Permissions
 
-    private var microphoneStep: some View {
-        VStack(spacing: 24) {
-            permissionIcon(
-                systemName: "mic.fill",
-                color: .red,
-                granted: appState.microphonePermissionGranted
-            )
+    private var permissionsPage: some View {
+        VStack(spacing: 18) {
+            pageTitle("Let's set up permissions", "Parrot asks only for what dictation needs. Each row turns green as soon as macOS grants it.")
 
-            VStack(spacing: 8) {
-                Text("Microphone Access")
-                    .font(.title.weight(.bold))
-
-                Text(
-                    "Parrot needs microphone access to record your voice for transcription."
+            VStack(spacing: 10) {
+                PermissionRow(
+                    systemImage: "mic.fill",
+                    title: "Allow Microphone Access",
+                    detail: "To hear you, only while you dictate.",
+                    granted: appState.microphonePermissionGranted,
+                    allow: { appState.startOnboardingMicMonitoring() }
                 )
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 340)
+                PermissionRow(
+                    systemImage: "hand.raised.fill",
+                    title: "Allow Accessibility Access",
+                    detail: "To paste your text where the cursor is.",
+                    granted: appState.accessibilityPermissionGranted,
+                    allow: requestAccessibility
+                )
+                PermissionRow(
+                    systemImage: "keyboard",
+                    title: "Allow Input Monitoring",
+                    detail: "To notice your push-to-talk key in any app.",
+                    granted: appState.inputMonitoringPermissionGranted,
+                    allow: requestInputMonitoring
+                )
             }
+
+            Text("macOS may ask you to quit and reopen Parrot after a change in System Settings.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+        }
+    }
+
+    private var missingPermissions: [String] {
+        OnboardingFlow.missingPermissions(
+            microphone: appState.microphonePermissionGranted,
+            accessibility: appState.accessibilityPermissionGranted,
+            inputMonitoring: appState.inputMonitoringPermissionGranted
+        )
+    }
+
+    private func requestAccessibility() {
+        guard let permissions = appState.permissionsManager else { return }
+        // AX trust has no callback; the page's timer notices the grant.
+        permissions.requestAccessibilityAccess()
+        permissions.openSystemPreferences(for: .accessibility)
+    }
+
+    private func requestInputMonitoring() {
+        guard let permissions = appState.permissionsManager else { return }
+        if !permissions.requestInputMonitoringAccess() {
+            permissions.openSystemPreferences(for: .inputMonitoring)
+        }
+    }
+
+    private func startPermissionPolling() {
+        permissionTimer?.invalidate()
+        appState.refreshPermissionHealth()
+        permissionTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            Task { @MainActor in
+                appState.refreshPermissionHealth()
+            }
+        }
+    }
+
+    private func stopPermissionPolling() {
+        permissionTimer?.invalidate()
+        permissionTimer = nil
+    }
+
+    // MARK: - Microphone Test
+
+    private var microphonePage: some View {
+        VStack(spacing: 16) {
+            pageTitle("Let's test your microphone", "Say \"This is my first recording with Parrot\" and watch the bars.")
 
             if appState.microphonePermissionGranted {
-                VStack(spacing: 10) {
-                    Label("Microphone access granted", systemImage: "checkmark.circle.fill")
-                        .font(.callout.weight(.medium))
-                        .foregroundStyle(.green)
-
-                    micLevelMeter
-                    Text("Say something and watch it react.")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
-            } else {
-                Button {
-                    requestMicrophonePermission()
-                } label: {
-                    Text("Grant Access")
-                        .frame(width: 160)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-            }
-        }
-    }
-
-    /// A simple horizontal bar reflecting the live input level (0...1).
-    private var micLevelMeter: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color(.separatorColor).opacity(0.4))
-                Capsule()
-                    .fill(LinearGradient(colors: [.green, .teal], startPoint: .leading, endPoint: .trailing))
-                    .frame(width: geo.size.width * CGFloat(min(1, max(0, appState.inputLevel))))
-                    .animation(.easeOut(duration: 0.08), value: appState.inputLevel)
-            }
-        }
-        .frame(width: 220, height: 8)
-    }
-
-    // MARK: - Step 3: Input Monitoring
-
-    private var inputMonitoringStep: some View {
-        VStack(spacing: 24) {
-            permissionIcon(
-                systemName: "keyboard",
-                color: .blue,
-                granted: appState.inputMonitoringPermissionGranted
-            )
-
-            VStack(spacing: 8) {
-                Text("Your dictation key")
-                    .font(.title.weight(.bold))
-
-                Text(
-                    "Parrot watches for one key: \(appState.toggleRecordingHotkey.displayName). Grant Input Monitoring, then hold the key to test it."
-                )
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 360)
-            }
-
-            if hotkeyDetected || appState.inputMonitoringPermissionGranted {
-                Label(
-                    hotkeyDetected ? "Key detected. You are set." : "Input monitoring enabled",
-                    systemImage: "checkmark.circle.fill"
-                )
-                .font(.callout.weight(.medium))
-                .foregroundStyle(.green)
-            } else {
-                VStack(spacing: 12) {
-                    Button {
-                        openInputMonitoringSettings()
-                    } label: {
-                        Text("Open System Settings")
-                            .frame(width: 180)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-
-                    Text("Enable Parrot in Privacy & Security > Input Monitoring, then hold \(appState.toggleRecordingHotkey.displayName) to confirm.")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 320)
-                }
-            }
-        }
-    }
-
-    // MARK: - Step 4: Accessibility (Auto-paste)
-
-    private var accessibilityStep: some View {
-        VStack(spacing: 24) {
-            permissionIcon(
-                systemName: "doc.on.clipboard",
-                color: .orange,
-                granted: appState.accessibilityPermissionGranted
-            )
-
-            VStack(spacing: 8) {
-                Text("Auto-paste")
-                    .font(.title.weight(.bold))
-
-                Text(
-                    "After transcribing, Parrot presses Cmd+V for you so text lands at your cursor. macOS calls this Accessibility access."
-                )
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 360)
-            }
-
-            if appState.accessibilityPermissionGranted {
-                Label("Auto-paste enabled", systemImage: "checkmark.circle.fill")
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.green)
-            } else {
-                VStack(spacing: 12) {
-                    Button {
-                        requestAccessibility()
-                    } label: {
-                        Text("Grant Access")
-                            .frame(width: 160)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-
-                    Text(
-                        "Enable Parrot in Privacy & Security > Accessibility. Used for one thing: pasting your dictation. Skip it and Parrot copies to your clipboard instead."
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 340)
-                }
-            }
-        }
-    }
-
-    // MARK: - Step 5: Model Download
-
-    private var modelDownloadStep: some View {
-        VStack(spacing: 24) {
-            ZStack {
-                Circle()
-                    .fill(Color.purple.opacity(0.15))
-                    .frame(width: 80, height: 80)
-
-                if appState.isModelReady {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 36))
-                        .foregroundStyle(.green)
-                } else {
-                    Image(systemName: "cpu")
-                        .font(.system(size: 36))
-                        .foregroundStyle(.purple)
-                }
-            }
-
-            VStack(spacing: 8) {
-                Text("Download Model")
-                    .font(.title.weight(.bold))
-
-                Text(
-                    "Download the Parakeet V3 speech recognition model (~800 MB). This model runs entirely on your Mac."
-                )
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 360)
-            }
-
-            if appState.isModelReady {
-                Label("Model ready", systemImage: "checkmark.circle.fill")
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.green)
-            } else if appState.isDownloadingModel {
-                VStack(spacing: 8) {
-                    ProgressView(value: appState.modelDownloadProgress)
-                        .progressViewStyle(.linear)
-                        .frame(width: 240)
-
-                    Text(
-                        "Downloading... \(Int(appState.modelDownloadProgress * 100))%"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-            } else {
-                Button {
-                    startModelDownload()
-                } label: {
-                    Label("Download Parakeet V3", systemImage: "arrow.down.circle")
-                        .frame(width: 200)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-            }
-
-            // Model specs
-            HStack(spacing: 20) {
-                modelSpec(label: "Size", value: "~800 MB")
-                modelSpec(label: "Languages", value: "25")
-                modelSpec(label: "Speed", value: "~190x RT")
-            }
-            .padding(.top, 4)
-        }
-    }
-
-    private func modelSpec(label: String, value: String) -> some View {
-        VStack(spacing: 2) {
-            Text(value)
-                .font(.callout.weight(.medium))
-            Text(label)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-        }
-    }
-
-    // MARK: - Step 6: Try It
-
-    private var tryItStep: some View {
-        VStack(spacing: 20) {
-            VStack(spacing: 8) {
-                Text("Try it out")
-                    .font(.title.weight(.bold))
-
-                Text(tryItInstruction)
+                LevelBarsView(levels: levelHistory.isEmpty ? [] : levelHistory.map { min(1, $0 * 4) }, barCount: 32, barWidth: 4, spacing: 3, height: 50, color: .accentColor)
+                    .frame(height: 56)
+                Text("Speak and see if the waves react.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 380)
+            } else {
+                Button("Allow Microphone Access") {
+                    appState.startOnboardingMicMonitoring()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
             }
 
-            // Live recording indicator.
-            HStack(spacing: 8) {
-                switch appState.recordingState {
-                case .recording:
-                    Circle().fill(Color.red).frame(width: 8, height: 8)
-                    Text("Listening...").foregroundStyle(.red)
-                case .processing:
-                    ProgressView().controlSize(.small)
-                    Text("Transcribing...").foregroundStyle(.secondary)
-                case .idle:
-                    Image(systemName: scratchpadText.isEmpty ? "keyboard" : "checkmark.circle.fill")
-                        .foregroundStyle(scratchpadText.isEmpty ? Color.secondary : Color.green)
-                    Text(scratchpadText.isEmpty ? "Ready when you are" : "That works in every app")
-                        .foregroundStyle(scratchpadText.isEmpty ? Color.secondary : Color.green)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("No response? Try changing your input device below.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ScrollView {
+                    DevicePickerView(devices: appState.services.devices) {
+                        // Restart the meter on the new device.
+                        appState.stopInputMonitoring()
+                        levelHistory = []
+                        appState.startInputMonitoring()
+                    }
+                }
+                .frame(maxHeight: 150)
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color(.controlBackgroundColor)))
+            }
+            .frame(maxWidth: 380)
+        }
+    }
+
+    // MARK: - Model
+
+    private var modelPage: some View {
+        let provider = appSettings.transcription.transcriptionProvider
+        let isLocal = provider == .parakeet
+        return VStack(spacing: 18) {
+            pageTitle("Select your preferred model", "You can change this any time under Models.")
+
+            HStack(spacing: 14) {
+                ModelChoiceCard(
+                    systemImage: "lock.laptopcomputer",
+                    title: "Local",
+                    detail: "Works offline with complete privacy. Best on Apple silicon.",
+                    isSelected: isLocal
+                ) {
+                    appSettings.transcription.transcriptionProvider = .parakeet
+                }
+                ModelChoiceCard(
+                    systemImage: "cloud",
+                    title: "Cloud",
+                    detail: "Uses OpenAI and needs internet. Audio is sent for transcription only.",
+                    isSelected: !isLocal
+                ) {
+                    appSettings.transcription.transcriptionProvider = .openAI
                 }
             }
-            .font(.callout.weight(.medium))
-            .frame(height: 20)
 
-            // Scratchpad the dictation pastes into.
+            Group {
+                if isLocal {
+                    if appState.isModelReady {
+                        Label("Download complete", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    } else if appState.isDownloadingModel {
+                        VStack(spacing: 6) {
+                            ProgressView(value: appState.modelDownloadProgress)
+                                .frame(width: 260)
+                            Text("Downloading Parakeet V3... \(Int(appState.modelDownloadProgress * 100))%")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        VStack(spacing: 6) {
+                            Text("The local model (about 800 MB) has not downloaded yet.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Button("Download") { appState.setup() }
+                        }
+                    }
+                } else if appSettings.credentials.key(for: .openAI).isEmpty {
+                    Text("Add your OpenAI API key under Models after setup. Until then Parrot can't transcribe in the cloud.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 380)
+                } else {
+                    Label("Your OpenAI key is set", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                }
+            }
+            .font(.callout)
+        }
+    }
+
+    // MARK: - Try It
+
+    private var pushToTalk: Shortcut {
+        appSettings.hotkeys.shortcut(for: .pushToTalk)
+    }
+
+    private var tryItPage: some View {
+        VStack(spacing: 14) {
+            pageTitle("Try the shortcut", "Choose the key you hold to talk.")
+
+            HStack(spacing: 8) {
+                ForEach(OnboardingFlow.presets) { preset in
+                    Button {
+                        setPushToTalk(preset.shortcut)
+                    } label: {
+                        Text(preset.name)
+                            .frame(minWidth: 96)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(pushToTalk == preset.shortcut ? .accentColor : nil)
+                    .controlSize(.large)
+                }
+            }
+
+            HotkeyRecorderView(
+                label: "Custom",
+                summary: OnboardingFlow.preset(matching: pushToTalk) == nil && !pushToTalk.isEmpty ? "Your own key" : nil,
+                shortcut: Binding(
+                    get: { pushToTalk.isEmpty ? nil : pushToTalk },
+                    set: { setPushToTalk($0 ?? .none) }
+                ),
+                allowsMouse: false
+            )
+            .frame(maxWidth: 380)
+
+            if pushToTalk.isEmpty {
+                Text("Pick a key above to continue.")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+            } else {
+                HStack(spacing: 6) {
+                    Text("Press and hold")
+                    ShortcutKeycaps(shortcut: pushToTalk)
+                    Text("and start speaking.")
+                }
+                .font(.callout)
+            }
+
+            Text("Click the box, then say: \"Parrot, please write this down for me.\"")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            recordingStatus
+
             TextEditor(text: $scratchpadText)
                 .font(.body)
                 .scrollContentBackground(.hidden)
                 .padding(8)
-                .frame(height: 120)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Color(.textBackgroundColor))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .strokeBorder(Color(.separatorColor), lineWidth: 1)
-                )
+                .frame(height: 80)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color(.textBackgroundColor)))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(.separatorColor), lineWidth: 1))
 
-            // Diagnose the paste-failure case inline.
-            if !scratchpadText.isEmpty {
-                Label("Nice. You are all set.", systemImage: "sparkles")
+            if scratchpadText.isEmpty, appState.lastTranscription != nil, !appState.accessibilityPermissionGranted {
+                Text("Transcribed, but could not paste. Your text is on the clipboard (press Cmd+V). Grant Accessibility to paste automatically.")
                     .font(.caption)
-                    .foregroundStyle(.green)
-            } else if appState.lastTranscription != nil && !appState.accessibilityPermissionGranted {
-                VStack(spacing: 6) {
-                    Text("Transcribed, but could not paste. Your text is on the clipboard (press Cmd+V). Grant Accessibility to enable auto-paste.")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 360)
-                    Button("Fix Accessibility") {
-                        currentStep = .accessibility
-                    }
-                    .buttonStyle(.link)
-                    .font(.caption)
-                }
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
             }
         }
     }
 
-    private var tryItInstruction: String {
-        let key = appState.toggleRecordingHotkey.displayName
-        return "Click the box below, then hold \(key) and say: testing Parrot one two three. Let go and watch it appear."
+    private var recordingStatus: some View {
+        HStack(spacing: 8) {
+            switch appState.recordingState {
+            case .recording:
+                Circle().fill(Color.red).frame(width: 8, height: 8)
+                Text("Listening...").foregroundStyle(.red)
+            case .processing:
+                ProgressView().controlSize(.small)
+                Text("Transcribing...").foregroundStyle(.secondary)
+            case .idle:
+                Image(systemName: scratchpadText.isEmpty ? "keyboard" : "checkmark.circle.fill")
+                    .foregroundStyle(scratchpadText.isEmpty ? Color.secondary : Color.green)
+                Text(scratchpadText.isEmpty ? "Ready when you are" : "Nice. That works in every app.")
+                    .foregroundStyle(scratchpadText.isEmpty ? Color.secondary : Color.green)
+            }
+        }
+        .font(.callout.weight(.medium))
+        .frame(height: 20)
     }
 
-    // MARK: - Permission Icon Helper
+    private func setPushToTalk(_ shortcut: Shortcut) {
+        appSettings.hotkeys.setShortcut(shortcut, for: .pushToTalk)
+        // HotkeyCenter follows the settings; this covers a listener that
+        // started before the change.
+        appState.syncHotkeys(from: appSettings)
+    }
 
-    private func permissionIcon(systemName: String, color: Color, granted: Bool) -> some View {
-        ZStack {
-            Circle()
-                .fill(color.opacity(0.15))
-                .frame(width: 80, height: 80)
+    // MARK: - Shared
 
-            if granted {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 36))
-                    .foregroundStyle(.green)
-            } else {
-                Image(systemName: systemName)
-                    .font(.system(size: 36))
-                    .foregroundStyle(color)
-            }
+    private func pageTitle(_ title: String, _ subtitle: String) -> some View {
+        VStack(spacing: 6) {
+            Text(title)
+                .font(.title.weight(.bold))
+                .multilineTextAlignment(.center)
+            Text(subtitle)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 400)
         }
     }
 
@@ -569,187 +530,169 @@ struct OnboardingView: View {
 
     private var navigationButtons: some View {
         HStack {
-            // Back
-            if currentStep != .welcome {
-                Button("Back") {
-                    goToPreviousStep()
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+            if page != .welcome {
+                Button("Back") { page = page.previous }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
             }
 
             Spacer()
 
-            // Next / Get Started
-            if currentStep == OnboardingStep.allCases.last {
+            if page.isLast {
                 Button {
-                    completeOnboarding()
+                    finish()
                 } label: {
-                    Text("Get Started")
-                        .frame(width: 120)
+                    Text("Complete onboarding")
+                        .frame(minWidth: 150)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(!canProceedFromCurrentStep)
+                .keyboardShortcut(.defaultAction)
             } else {
                 Button {
-                    goToNextStep()
+                    advance()
                 } label: {
-                    Text("Continue")
-                        .frame(width: 100)
+                    Text(page == .welcome ? "Get Started" : continueTitle)
+                        .frame(minWidth: 110)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+                .keyboardShortcut(.defaultAction)
             }
         }
     }
 
-    private var canProceedFromCurrentStep: Bool {
-        switch currentStep {
-        case .welcome:
-            return true
-        case .microphonePermission:
-            return appState.microphonePermissionGranted
-        case .inputMonitoring:
-            return appState.inputMonitoringPermissionGranted
-        case .accessibility:
-            // Skippable: clipboard-only is a valid degraded mode.
-            return true
-        case .modelDownload:
-            return appState.isModelReady
-        case .tryIt:
-            // Never trap the user: Finish is always available here. A
-            // successful dictation is celebrated but not required (paste may
-            // be intentionally skipped in the Accessibility step).
-            return true
+    private var continueTitle: String {
+        if page == .model, appSettings.transcription.transcriptionProvider == .parakeet, !appState.isModelReady {
+            return "Continue while it downloads"
         }
+        return "Continue"
     }
 
-    // MARK: - Navigation Actions
-
-    private func goToNextStep() {
-        guard let nextRaw = OnboardingStep(rawValue: currentStep.rawValue + 1) else { return }
-        currentStep = nextRaw
+    private func advance() {
+        if page == .permissions, !missingPermissions.isEmpty {
+            pendingWarning = .permissionsRequired(missing: missingPermissions)
+            return
+        }
+        page = page.next
     }
 
-    private func goToPreviousStep() {
-        guard let prevRaw = OnboardingStep(rawValue: currentStep.rawValue - 1) else { return }
-        currentStep = prevRaw
-    }
-
-    private func completeOnboarding() {
-        appState.hasCompletedOnboarding = true
-        appSettings.hasCompletedOnboarding = true
-        inputMonitoringTimer?.invalidate()
-        inputMonitoringTimer = nil
+    private func finish() {
+        leave(page)
+        OnboardingFlow.complete(appSettings.general)
         onComplete?()
     }
 
-    // MARK: - Permission Actions
-
-    private func requestMicrophonePermission() {
-        // Trigger the prompt by starting the audio engine (reliable on
-        // self-signed builds), not AVCaptureDevice.requestAccess which can hang.
-        appState.startOnboardingMicMonitoring()
-    }
-
-    private func openInputMonitoringSettings() {
-        guard let permissions = appState.permissionsManager else {
-            // Fallback: open System Settings directly
-            if let url = URL(
-                string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
-            ) {
-                NSWorkspace.shared.open(url)
-            }
-            return
-        }
-        permissions.requestInputMonitoringAccess()
-        startInputMonitoringPolling()
-    }
-
-    private func startInputMonitoringPolling() {
-        inputMonitoringTimer?.invalidate()
-        inputMonitoringTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-            Task { @MainActor in
-                guard let permissions = appState.permissionsManager else { return }
-                let granted = permissions.checkInputMonitoringPermission()
-                if granted {
-                    appState.inputMonitoringPermissionGranted = true
-                    inputMonitoringTimer?.invalidate()
-                    inputMonitoringTimer = nil
-                }
-            }
-        }
-    }
-
-    /// Starts and stops per-step live affordances (mic meter, hotkey probe) as
-    /// the user moves through the wizard.
-    private func configureStep(_ step: OnboardingStep) {
-        // Mic level meter: only while on the microphone step.
-        if step == .microphonePermission {
-            if !appState.microphonePermissionGranted {
-                appState.startOnboardingMicMonitoring()
-            } else {
+    /// Starts each page's live parts.
+    private func enter(_ page: OnboardingPage) {
+        switch page {
+        case .permissions:
+            startPermissionPolling()
+        case .microphone:
+            levelHistory = []
+            if appState.microphonePermissionGranted {
                 appState.startInputMonitoring()
+            } else {
+                appState.startOnboardingMicMonitoring()
             }
-        } else {
+        case .tryIt:
+            // Try it dictates for real, so it needs the hotkey listener and
+            // the rest of the pipeline that setup creates. Idempotent.
+            appState.setup()
+        case .welcome, .model:
+            break
+        }
+    }
+
+    /// Stops what `enter` started.
+    private func leave(_ page: OnboardingPage) {
+        switch page {
+        case .permissions:
+            stopPermissionPolling()
+        case .microphone:
             appState.stopInputMonitoring()
-        }
-
-        // Functional hotkey probe: only while on the hotkey step.
-        if step == .inputMonitoring {
-            startHotkeyProbe()
-        } else {
-            hotkeyProbe?.stop()
-            hotkeyProbe = nil
+        case .welcome, .model, .tryIt:
+            break
         }
     }
+}
 
-    private func startHotkeyProbe() {
-        hotkeyDetected = false
-        hotkeyProbe?.stop()
-        let probe = HotkeyProbe(targetKeyCode: Int(appState.toggleRecordingHotkey.keyCode))
-        probe.onDetected = {
-            hotkeyDetected = true
-            // A live press is the strongest proof the key is detectable.
-            appState.inputMonitoringPermissionGranted = true
-        }
-        probe.start()
-        hotkeyProbe = probe
-    }
+// MARK: - Pieces
 
-    private func requestAccessibility() {
-        guard let permissions = appState.permissionsManager else {
-            if let url = URL(
-                string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-            ) {
-                NSWorkspace.shared.open(url)
+/// One permission: what it is for, and Allow or a green tick.
+private struct PermissionRow: View {
+    let systemImage: String
+    let title: String
+    let detail: String
+    let granted: Bool
+    let allow: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: systemImage)
+                .font(.title3)
+                .foregroundStyle(granted ? Color.green : Color.accentColor)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.callout.weight(.medium))
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            return
-        }
-        // Show the AX trust prompt and deep-link straight to the pane; AX trust
-        // has no completion callback, so poll until it flips.
-        permissions.requestAccessibilityAccess()
-        permissions.openSystemPreferences(for: .accessibility)
-        startAccessibilityPolling()
-    }
-
-    private func startAccessibilityPolling() {
-        accessibilityTimer?.invalidate()
-        accessibilityTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-            Task { @MainActor in
-                guard let permissions = appState.permissionsManager else { return }
-                if permissions.checkAccessibilityPermission() {
-                    appState.accessibilityPermissionGranted = true
-                    accessibilityTimer?.invalidate()
-                    accessibilityTimer = nil
-                }
+            Spacer()
+            if granted {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.green)
+                    .accessibilityLabel("Granted")
+            } else {
+                Button("Allow", action: allow)
+                    .buttonStyle(.borderedProminent)
             }
         }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(.controlBackgroundColor)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(granted ? Color.green.opacity(0.4) : Color.clear, lineWidth: 1)
+        )
     }
+}
 
-    private func startModelDownload() {
-        appState.setup()
+/// The Local or Cloud card.
+private struct ModelChoiceCard: View {
+    let systemImage: String
+    let title: String
+    let detail: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 8) {
+                Image(systemName: systemImage)
+                    .font(.title2)
+                    .foregroundStyle(Color.accentColor)
+                Text(title)
+                    .font(.headline)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+            .padding(14)
+            .frame(width: 200, height: 130, alignment: .topLeading)
+            .background(RoundedRectangle(cornerRadius: 12).fill(Color(.controlBackgroundColor)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(isSelected ? Color.accentColor : Color(.separatorColor), lineWidth: isSelected ? 2 : 0.5)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 

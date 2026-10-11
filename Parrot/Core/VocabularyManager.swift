@@ -6,7 +6,10 @@ import Foundation
 /// if the matched text is all-uppercase the replacement is uppercased, and if
 /// the first character is uppercase the replacement is capitalized.
 ///
-/// Persists entries to a JSON file in Application Support.
+/// The single source of truth for vocabulary: the Vocabulary tab edits it
+/// (through `AppState.vocabularyEntries`), and find and replace plus
+/// recognizer boosting read it. Every change is saved to a JSON file in
+/// Application Support.
 @Observable
 final class VocabularyManager {
 
@@ -16,18 +19,18 @@ final class VocabularyManager {
 
     // MARK: - Persistence
 
-    private static var storageURL: URL {
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first!
-        let dir = appSupport.appendingPathComponent("Parrot", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("vocabulary.json")
+    private let storageURL: URL
+
+    static func defaultStorageURL() -> URL {
+        AppPaths.defaultRoot.appendingPathComponent("vocabulary.json")
     }
 
     // MARK: - Initialization
 
-    init() {
+    /// - Parameter storageURL: JSON file to load from and save to. Tests pass
+    ///   a temporary file; the app uses the default.
+    init(storageURL: URL = VocabularyManager.defaultStorageURL()) {
+        self.storageURL = storageURL
         load()
     }
 
@@ -60,6 +63,12 @@ final class VocabularyManager {
         save()
     }
 
+    /// Replaces the whole list (the Vocabulary tab edits a copy) and saves.
+    func replaceAll(_ newEntries: [VocabularyEntry]) {
+        entries = newEntries
+        save()
+    }
+
     // MARK: - Replacement Engine
 
     /// Applies all enabled vocabulary entries to the given text.
@@ -75,10 +84,18 @@ final class VocabularyManager {
 
     /// Pure, storage-free application of vocabulary entries to text. Exposed as
     /// a static function so it can be tested without touching the persisted
-    /// vocabulary file.
-    static func apply(entries: [VocabularyEntry], to text: String) -> String {
+    /// vocabulary file. Words are recognition hints and never rewrite text.
+    ///
+    /// - Parameter skippingSelfContaining: Skip replacements whose text
+    ///   contains the original as a whole word. The second pass after
+    ///   refinement sets it so "Parrot" to "Parrot app" cannot double.
+    static func apply(entries: [VocabularyEntry], to text: String, skippingSelfContaining: Bool = false) -> String {
         var result = text
-        for entry in entries where entry.isEnabled && !entry.original.isEmpty {
+        for entry in entries where entry.isEnabled && !entry.original.isEmpty && !entry.isWord {
+            if skippingSelfContaining,
+               containsWholeWord(entry.replacement, target: entry.original) {
+                continue
+            }
             result = replacePreservingCase(
                 in: result,
                 target: entry.original,
@@ -86,6 +103,42 @@ final class VocabularyManager {
             )
         }
         return result
+    }
+
+    /// Applies replacements again after refinement (see `apply`).
+    func applyAfterRefinement(to text: String) -> String {
+        Self.apply(entries: entries, to: text, skippingSelfContaining: true)
+    }
+
+    // MARK: - Words and Replacements
+
+    /// Enabled and disabled words, in list order.
+    var words: [VocabularyEntry] { entries.filter(\.isWord) }
+
+    /// Replacements, in list order.
+    var replacements: [VocabularyEntry] { entries.filter { !$0.isWord } }
+
+    /// Merges words and replacements into the list. Matching is
+    /// case-insensitive on `original`: an existing replacement always wins,
+    /// an incoming replacement upgrades an existing word, and a word already
+    /// present (as a word or a replacement) is skipped. Returns the counts.
+    @discardableResult
+    func merge(_ incoming: [VocabularyEntry]) -> VocabularyMerge.Result {
+        let result = VocabularyMerge.merge(existing: entries, incoming: incoming)
+        if result.entries != entries {
+            entries = result.entries
+            save()
+        }
+        return result
+    }
+
+    private static func containsWholeWord(_ text: String, target: String) -> Bool {
+        var searchRange = text.startIndex..<text.endIndex
+        while let range = text.range(of: target, options: .caseInsensitive, range: searchRange) {
+            if isWordBoundaryMatch(range, in: text, target: target) { return true }
+            searchRange = text.index(after: range.lowerBound)..<text.endIndex
+        }
+        return false
     }
 
     // MARK: - Private Helpers
@@ -166,15 +219,19 @@ final class VocabularyManager {
 
     private func save() {
         do {
+            try FileManager.default.createDirectory(
+                at: storageURL.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
             let data = try JSONEncoder().encode(entries)
-            try data.write(to: Self.storageURL, options: .atomic)
+            try data.write(to: storageURL, options: .atomic)
         } catch {
             // Non-fatal: entries remain in memory.
+            diagLog("[Parrot:Vocab] Saving vocabulary failed: \(error)")
         }
     }
 
     private func load() {
-        let url = Self.storageURL
+        let url = storageURL
         guard FileManager.default.fileExists(atPath: url.path) else { return }
 
         do {

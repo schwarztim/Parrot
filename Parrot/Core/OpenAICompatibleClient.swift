@@ -1,7 +1,7 @@
 import Foundation
 
 /// Chat-completions client for OpenAI and any OpenAI-compatible server
-/// (Ollama, LM Studio, llama.cpp, vLLM).
+/// (Groq, DeepSeek, Ollama, LM Studio, llama.cpp, vLLM).
 ///
 /// Sends POST {baseURL}/chat/completions with an optional Bearer token.
 /// Local servers such as Ollama need no key.
@@ -13,11 +13,22 @@ struct OpenAICompatibleClient: RefinementClient {
     /// Optional Bearer token. Nil for keyless local servers.
     let apiKey: String?
     var timeoutInterval: TimeInterval = 30
+    /// How requests are sent; tests pass canned replies.
+    var transport: any HTTPTransport = URLSessionTransport()
 
     func refine(_ text: String, system: String, model: String) async throws -> String {
+        let request = try makeRequest(text, system: system, model: model)
+        let (data, response) = try await transport.send(request)
+        return try ChatCompletionResponse.content(
+            from: data, statusCode: response.statusCode, errorMessage: Self.decodeErrorMessage
+        )
+    }
+
+    /// The request `refine` sends.
+    func makeRequest(_ text: String, system: String, model: String) throws -> URLRequest {
         let base = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let urlString = "\(base)/chat/completions"
-        guard let url = URL(string: urlString) else {
+        guard let url = URL(string: urlString), url.scheme != nil else {
             throw RefinementError.invalidEndpoint(urlString)
         }
 
@@ -37,24 +48,7 @@ struct OpenAICompatibleClient: RefinementClient {
             ]
         )
         request.httpBody = try JSONEncoder().encode(body)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw RefinementError.invalidResponse
-        }
-
-        guard (200...299).contains(httpResponse.statusCode) else {
-            throw RefinementError.providerError(
-                statusCode: httpResponse.statusCode,
-                message: Self.decodeErrorMessage(from: data)
-            )
-        }
-
-        let completion = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
-        guard let content = completion.choices.first?.message.content, !content.isEmpty else {
-            throw RefinementError.emptyResponse
-        }
-        return content
+        return request
     }
 
     /// Decodes an OpenAI-style error body: {"error": {"message": ...}}.
@@ -99,10 +93,35 @@ struct ChatCompletionResponse: Decodable {
 
     struct Choice: Decodable {
         let message: MessageContent
+        /// "stop", or "length" when the reply ran out of room.
+        let finishReason: String?
+
+        enum CodingKeys: String, CodingKey {
+            case message
+            case finishReason = "finish_reason"
+        }
     }
 
     struct MessageContent: Decodable {
         let content: String?
+    }
+
+    /// The reply text from a chat-completions response. Throws the decoded
+    /// provider error on HTTP failure, `truncated` when the reply was cut
+    /// short, and `emptyResponse` when there is no text.
+    static func content(from data: Data, statusCode: Int, errorMessage: (Data) -> String) throws -> String {
+        guard (200...299).contains(statusCode) else {
+            throw RefinementError.providerError(statusCode: statusCode, message: errorMessage(data))
+        }
+        guard let completion = try? JSONDecoder().decode(ChatCompletionResponse.self, from: data) else {
+            throw RefinementError.invalidResponse
+        }
+        guard let choice = completion.choices.first else { throw RefinementError.emptyResponse }
+        if choice.finishReason == "length" { throw RefinementError.truncated }
+        guard let content = choice.message.content, !content.isEmpty else {
+            throw RefinementError.emptyResponse
+        }
+        return content
     }
 }
 

@@ -2,18 +2,27 @@ import AppKit
 import Carbon
 import KeyboardShortcuts
 
-/// Manages global hotkey detection for push-to-talk recording.
+/// Detects every global shortcut binding and reports presses by id.
 ///
 /// Uses a layered approach for maximum reliability:
-/// - **Key combos** (e.g., Cmd+Shift+Space): Uses `KeyboardShortcuts` library
-///   which wraps Carbon `RegisterEventHotKey` — requires **no permissions**.
-/// - **Modifier-only keys** (e.g., Right Option): Dual-path — both `CGEventTap`
-///   (`.listenOnly`, needs Input Monitoring on macOS 15+) and `NSEvent` global
-///   monitor (needs Accessibility) run simultaneously. This ensures detection
-///   even when one path is silently broken ("deaf tap" on macOS 15+).
-///   `NSEvent` local monitor is always active (no permissions needed).
-/// - **Mouse buttons**: Uses both global and local `NSEvent` monitors for
-///   `.otherMouseDown/.otherMouseUp` — global needs **Accessibility** permission.
+/// - **Key combos** (e.g., Option+Space): `KeyboardShortcuts` library, which
+///   wraps Carbon `RegisterEventHotKey`; requires **no permissions**. One
+///   library name per registration id.
+/// - **Lone modifier keys** (e.g., Right Option, Fn): dual path, both
+///   `CGEventTap` (`.listenOnly`, needs Input Monitoring on macOS 15+) and
+///   `NSEvent` global monitor (needs Accessibility) run simultaneously. This
+///   ensures detection even when one path is silently broken ("deaf tap" on
+///   macOS 15+). `NSEvent` local monitor is always active (no permissions).
+///   Key down events on the same paths report a key combination typed while
+///   a lone modifier is held (`.interrupted`).
+/// - **Fn/Globe and Caps Lock**: `HIDKeyMonitor` when it can open the
+///   keyboards, else the flagsChanged path above.
+/// - **Mouse buttons**: both global and local `NSEvent` monitors for
+///   `.otherMouseDown/.otherMouseUp`; global needs **Accessibility**.
+///
+/// Listeners are installed once by `start()`. `setBindings(_:)` only
+/// re-registers the key combos that changed, so a key held across an
+/// update keeps its state.
 final class HotkeyManager {
 
     // MARK: - Types
@@ -30,19 +39,55 @@ final class HotkeyManager {
             modifierFlags: CGEventFlags.maskAlternate.rawValue,
             isModifierOnly: true
         )
+
+        var isKeyCombo: Bool { !isModifierOnly && !isMouseButton }
+    }
+
+    enum Event: Equatable, Sendable {
+        case down
+        case up
+        /// Another key went down while this lone modifier was held.
+        case interrupted
     }
 
     // MARK: - Callbacks
 
+    /// Every registration's presses, by registration id. Called on the main thread.
+    var onEvent: ((String, Event) -> Void)?
+
+    /// The primary registration's presses only (kept for older callers).
     var onKeyDown: (() -> Void)?
     var onKeyUp: (() -> Void)?
 
     // MARK: - Configuration
 
-    var binding: GlobalHotkeyBinding = .rightOption {
+    /// Registration id of the primary binding (push to talk).
+    static let primaryID = "pushToTalk"
+
+    /// The primary binding. Setting it replaces only that registration.
+    var binding: GlobalHotkeyBinding {
+        get { registrations[Self.primaryID] ?? .rightOption }
+        set {
+            var updated = registrations
+            updated[Self.primaryID] = newValue
+            setBindings(updated)
+        }
+    }
+
+    /// Every binding by registration id.
+    private(set) var registrations: [String: GlobalHotkeyBinding] = [:]
+
+    /// While true, nothing is reported and no key combo is registered, so a
+    /// shortcut recorder can capture keys that are bound today.
+    var isPaused = false {
         didSet {
-            guard binding != oldValue else { return }
-            reinstallListeners()
+            guard isPaused != oldValue, isRunning else { return }
+            if isPaused {
+                release(downIDs)
+                for id in Array(comboTasks.keys) { removeCombo(id) }
+            } else {
+                updateCombos(from: [:], to: registrations)
+            }
         }
     }
 
@@ -52,23 +97,21 @@ final class HotkeyManager {
 
     // MARK: - Private State
 
-    private var isKeyDown = false
-    private var shortcutTask: Task<Void, Never>?
     private var isRunning = false
+    private var downIDs: Set<String> = []
+    private var comboTasks: [String: Task<Void, Never>] = [:]
+    private let hid = HIDKeyMonitor()
+    /// Last Caps Lock state seen through flagsChanged (fallback path).
+    private var lastCapsLockOn: Bool?
 
-    // CGEventTap (primary for modifier-only — most reliable when permissions work)
+    // CGEventTap (primary for modifier-only, most reliable when permissions work)
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
 
-    // Global monitors (fire when OTHER apps are focused — need Accessibility)
-    private var globalFlagsMonitor: Any?
-    private var globalMouseDownMonitor: Any?
-    private var globalMouseUpMonitor: Any?
-
-    // Local monitors (fire when PARROT is focused — no permissions needed)
-    private var localFlagsMonitor: Any?
-    private var localMouseDownMonitor: Any?
-    private var localMouseUpMonitor: Any?
+    // Global monitors (fire when OTHER apps are focused; need Accessibility)
+    private var globalMonitors: [Any] = []
+    // Local monitors (fire when PARROT is focused; no permissions needed)
+    private var localMonitors: [Any] = []
 
     // MARK: - Lifecycle
 
@@ -79,123 +122,105 @@ final class HotkeyManager {
     func start() {
         guard !isRunning else { return }
         isRunning = true
-        installListeners()
+        // Clear the single-binding registration older builds left behind.
+        KeyboardShortcuts.setShortcut(nil, for: .toggleRecording)
+        installEventListeners()
+        if !isPaused { updateCombos(from: [:], to: registrations) }
+        updateHID()
     }
 
     func stop() {
         guard isRunning else { return }
         isRunning = false
-        removeAllListeners()
+        for id in Array(comboTasks.keys) { removeCombo(id) }
+        removeEventListeners()
+        hid.stop()
+        downIDs.removeAll()
     }
 
-    // MARK: - Private
-
-    private func reinstallListeners() {
+    /// Replaces every registration. Unchanged ids keep their listener and
+    /// their pressed state.
+    func setBindings(_ bindings: [String: GlobalHotkeyBinding]) {
+        let old = registrations
+        registrations = bindings
+        release(downIDs.filter { old[$0] != bindings[$0] })
         guard isRunning else { return }
-        removeAllListeners()
-        installListeners()
+        if !isPaused { updateCombos(from: old, to: bindings) }
+        updateHID()
     }
 
-    private func installListeners() {
-        if binding.isMouseButton {
-            installMouseListeners()
-        } else if binding.isModifierOnly {
-            installModifierListener()
-        } else {
-            installKeyComboListener()
+    // MARK: - Reporting
+
+    private func keyDown(_ id: String) {
+        guard !isPaused, !downIDs.contains(id) else { return }
+        downIDs.insert(id)
+        diagLog("[Parrot:HotkeyManager] DOWN \(id)")
+        if id == Self.primaryID { onKeyDown?() }
+        onEvent?(id, .down)
+    }
+
+    private func keyUp(_ id: String) {
+        guard downIDs.remove(id) != nil else { return }
+        diagLog("[Parrot:HotkeyManager] UP \(id)")
+        if id == Self.primaryID { onKeyUp?() }
+        onEvent?(id, .up)
+    }
+
+    /// Reports a release for keys whose registration goes away while held,
+    /// so a listener never waits for a release that cannot arrive.
+    private func release(_ ids: Set<String>) {
+        for id in ids.sorted() { keyUp(id) }
+    }
+
+    // MARK: - Key Combos (via KeyboardShortcuts; no permissions needed)
+
+    /// Removes changed combos before adding, so a shortcut moving from one
+    /// id to another is never unregistered after its new owner registered it.
+    private func updateCombos(from old: [String: GlobalHotkeyBinding], to new: [String: GlobalHotkeyBinding]) {
+        let changed = Set(old.keys).union(new.keys).filter { old[$0] != new[$0] || comboTasks[$0] == nil }
+        for id in changed where comboTasks[id] != nil { removeCombo(id) }
+        for id in changed.sorted() {
+            if let binding = new[id], binding.isKeyCombo { addCombo(id, binding) }
         }
     }
 
-    private func removeAllListeners() {
-        // Remove CGEventTap
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
-        }
-        runLoopSource = nil
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            CFMachPortInvalidate(tap)
-        }
-        eventTap = nil
-
-        // Remove global NSEvent monitors
-        for monitor in [globalFlagsMonitor, globalMouseDownMonitor, globalMouseUpMonitor] {
-            if let m = monitor { NSEvent.removeMonitor(m) }
-        }
-        globalFlagsMonitor = nil
-        globalMouseDownMonitor = nil
-        globalMouseUpMonitor = nil
-
-        // Remove local NSEvent monitors
-        for monitor in [localFlagsMonitor, localMouseDownMonitor, localMouseUpMonitor] {
-            if let m = monitor { NSEvent.removeMonitor(m) }
-        }
-        localFlagsMonitor = nil
-        localMouseDownMonitor = nil
-        localMouseUpMonitor = nil
-
-        // Cancel KeyboardShortcuts async stream
-        shortcutTask?.cancel()
-        shortcutTask = nil
-
-        // Unregister the Carbon hotkey
-        KeyboardShortcuts.setShortcut(nil, for: .toggleRecording)
-
-        isKeyDown = false
-    }
-
-    // MARK: - Key Combo (via KeyboardShortcuts — no permissions needed)
-
-    private func installKeyComboListener() {
-        let carbonMods = nsModifiersToCarbonModifiers(UInt64(binding.modifierFlags))
-        let shortcut = KeyboardShortcuts.Shortcut(
-            carbonKeyCode: binding.keyCode,
-            carbonModifiers: carbonMods
+    private func addCombo(_ id: String, _ binding: GlobalHotkeyBinding) {
+        let name = KeyboardShortcuts.Name("parrot.\(id)")
+        let flags = NSEvent.ModifierFlags(rawValue: UInt(binding.modifierFlags))
+        KeyboardShortcuts.setShortcut(
+            KeyboardShortcuts.Shortcut(
+                carbonKeyCode: binding.keyCode,
+                carbonModifiers: SuperwhisperShortcut.carbonModifiers(flags)
+            ),
+            for: name
         )
-        KeyboardShortcuts.setShortcut(shortcut, for: .toggleRecording)
-
-        shortcutTask = Task { @MainActor [weak self] in
-            for await event in KeyboardShortcuts.events(for: .toggleRecording) {
+        comboTasks[id] = Task { @MainActor [weak self] in
+            for await event in KeyboardShortcuts.events(for: name) {
                 guard let self else { return }
                 switch event {
-                case .keyDown:
-                    if !self.isKeyDown {
-                        self.isKeyDown = true
-                        diagLog("[Parrot:HotkeyManager] KeyCombo DOWN")
-                        self.onKeyDown?()
-                    }
-                case .keyUp:
-                    if self.isKeyDown {
-                        self.isKeyDown = false
-                        diagLog("[Parrot:HotkeyManager] KeyCombo UP")
-                        self.onKeyUp?()
-                    }
+                case .keyDown: self.keyDown(id)
+                case .keyUp: self.keyUp(id)
                 }
             }
         }
-
-        diagLog("[Parrot:HotkeyManager] Key combo listener installed (keyCode=\(binding.keyCode), mods=\(binding.modifierFlags))")
+        diagLog("[Parrot:HotkeyManager] Key combo registered \(id) (keyCode=\(binding.keyCode), mods=\(binding.modifierFlags))")
     }
 
-    private func nsModifiersToCarbonModifiers(_ flags: UInt64) -> Int {
-        var carbon = 0
-        let cgFlags = CGEventFlags(rawValue: flags)
-        if cgFlags.contains(.maskCommand) { carbon |= cmdKey }
-        if cgFlags.contains(.maskShift) { carbon |= shiftKey }
-        if cgFlags.contains(.maskAlternate) { carbon |= optionKey }
-        if cgFlags.contains(.maskControl) { carbon |= controlKey }
-        return carbon
+    private func removeCombo(_ id: String) {
+        comboTasks.removeValue(forKey: id)?.cancel()
+        KeyboardShortcuts.setShortcut(nil, for: KeyboardShortcuts.Name("parrot.\(id)"))
+        downIDs.remove(id)
     }
 
-    // MARK: - Modifier-Only (CGEventTap + NSEvent in parallel)
+    // MARK: - Event Listeners (CGEventTap + NSEvent in parallel)
 
-    private func installModifierListener() {
-        // CGEventTap: session-level, listen-only tap into HID stream.
-        // Most reliable when Input Monitoring is properly granted.
+    private func installEventListeners() {
+        // CGEventTap: session-level, listen-only tap into the HID stream.
         // On macOS 15+, the tap can be "deaf" (created successfully but
-        // silently dropping all physical events). NSEvent global monitor
-        // runs in parallel as a guaranteed detection path.
-        let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue)
+        // silently dropping all physical events). NSEvent global monitors
+        // run in parallel as a guaranteed detection path; downIDs keeps the
+        // two paths from double-firing.
+        let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue)
 
         let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -215,11 +240,12 @@ final class HotkeyManager {
                     return Unmanaged.passUnretained(event)
                 }
 
-                guard type == .flagsChanged else {
-                    return Unmanaged.passUnretained(event)
+                let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
+                if type == .flagsChanged {
+                    mgr.handleFlagsChanged(keyCode: keyCode, flags: event.flags.rawValue)
+                } else if type == .keyDown {
+                    mgr.handleKeyDown(keyCode: keyCode)
                 }
-
-                mgr.handleCGFlagsChanged(event)
                 return Unmanaged.passUnretained(event)
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque()
@@ -231,169 +257,172 @@ final class HotkeyManager {
             self.runLoopSource = source
             CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
             CGEvent.tapEnable(tap: tap, enable: true)
-            diagLog("[Parrot:HotkeyManager] CGEventTap installed (keyCode=\(binding.keyCode))")
         } else {
             diagLog("[Parrot:HotkeyManager] CGEventTap FAILED to create")
         }
 
-        // ALWAYS install NSEvent global monitor alongside CGEventTap.
-        // On macOS 15+, CGEventTap can be created successfully but silently
-        // drop all physical events ("deaf tap") due to Input Monitoring TCC
-        // issues. NSEvent global monitor uses Accessibility TCC (separate,
-        // more reliable permission). The isKeyDown state machine prevents
-        // double-firing when both paths deliver the same event.
-        globalFlagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) {
-            [weak self] event in
-            self?.handleFlagsChanged(event)
+        let flags = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            self?.handleFlagsChanged(keyCode: Int(event.keyCode), flags: UInt64(event.modifierFlags.rawValue))
         }
-        if globalFlagsMonitor == nil {
-            diagLog("[Parrot:HotkeyManager] WARNING: NSEvent global monitor FAILED — no Accessibility?")
-        } else {
-            diagLog("[Parrot:HotkeyManager] NSEvent global monitor installed (parallel listener)")
+        let keys = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.handleKeyDown(keyCode: Int(event.keyCode))
         }
-
-        // Always install local monitor — works when Parrot is focused, no permissions.
-        localFlagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) {
-            [weak self] event in
-            self?.handleFlagsChanged(event)
-            return event
+        let mouseDown = NSEvent.addGlobalMonitorForEvents(matching: .otherMouseDown) { [weak self] event in
+            self?.handleMouse(button: event.buttonNumber, isDown: true)
+        }
+        let mouseUp = NSEvent.addGlobalMonitorForEvents(matching: .otherMouseUp) { [weak self] event in
+            self?.handleMouse(button: event.buttonNumber, isDown: false)
+        }
+        globalMonitors = [flags, keys, mouseDown, mouseUp].compactMap { $0 }
+        if flags == nil {
+            diagLog("[Parrot:HotkeyManager] WARNING: NSEvent global monitor FAILED; no Accessibility?")
         }
 
-        let hasTap = eventTap != nil
-        let hasGlobal = globalFlagsMonitor != nil
-        let hasLocal = localFlagsMonitor != nil
-        diagLog("[Parrot:HotkeyManager] Modifier listeners: cgEventTap=\(hasTap), globalNSEvent=\(hasGlobal), localNSEvent=\(hasLocal), keyCode=\(binding.keyCode)")
+        localMonitors = [
+            NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+                self?.handleFlagsChanged(keyCode: Int(event.keyCode), flags: UInt64(event.modifierFlags.rawValue))
+                return event
+            },
+            NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                self?.handleKeyDown(keyCode: Int(event.keyCode))
+                return event
+            },
+            NSEvent.addLocalMonitorForEvents(matching: .otherMouseDown) { [weak self] event in
+                self?.handleMouse(button: event.buttonNumber, isDown: true)
+                return event
+            },
+            NSEvent.addLocalMonitorForEvents(matching: .otherMouseUp) { [weak self] event in
+                self?.handleMouse(button: event.buttonNumber, isDown: false)
+                return event
+            },
+        ].compactMap { $0 }
+
+        diagLog("[Parrot:HotkeyManager] Listeners: cgEventTap=\(eventTap != nil), globalNSEvent=\(flags != nil), localNSEvent=\(!localMonitors.isEmpty)")
     }
 
-    // MARK: - Modifier Target Flags
-
-    /// The CGEventFlags bit for the configured modifier key.
-    private var targetCGFlag: CGEventFlags {
-        switch binding.keyCode {
-        case 0x3A, 0x3D: return .maskAlternate
-        case 0x37, 0x36: return .maskCommand
-        case 0x38, 0x3C: return .maskShift
-        case 0x3B, 0x3E: return .maskControl
-        default: return []
+    private func removeEventListeners() {
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
         }
+        runLoopSource = nil
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
+        }
+        eventTap = nil
+        for monitor in globalMonitors + localMonitors { NSEvent.removeMonitor(monitor) }
+        globalMonitors = []
+        localMonitors = []
     }
 
-    /// The NSEvent.ModifierFlags bit for the configured modifier key.
-    private var targetNSFlag: NSEvent.ModifierFlags {
-        switch binding.keyCode {
-        case 0x3A, 0x3D: return .option
-        case 0x37, 0x36: return .command
-        case 0x38, 0x3C: return .shift
-        case 0x3B, 0x3E: return .control
-        default: return []
-        }
+    // MARK: - Lone Modifier Keys
+
+    /// Generic flag and device-specific (left or right) flag per key code.
+    private static let modifierMasks: [Int: (generic: UInt64, device: UInt64)] = [
+        0x37: (CGEventFlags.maskCommand.rawValue, 0x08),   // Left Command
+        0x36: (CGEventFlags.maskCommand.rawValue, 0x10),   // Right Command
+        0x38: (CGEventFlags.maskShift.rawValue, 0x02),     // Left Shift
+        0x3C: (CGEventFlags.maskShift.rawValue, 0x04),     // Right Shift
+        0x3A: (CGEventFlags.maskAlternate.rawValue, 0x20), // Left Option
+        0x3D: (CGEventFlags.maskAlternate.rawValue, 0x40), // Right Option
+        0x3B: (CGEventFlags.maskControl.rawValue, 0x01),   // Left Control
+        0x3E: (CGEventFlags.maskControl.rawValue, 0x2000), // Right Control
+        0x3F: (CGEventFlags.maskSecondaryFn.rawValue, 0),  // Fn
+    ]
+
+    /// Device bits of both sides of a modifier family.
+    private static func familyDeviceMask(_ generic: UInt64) -> UInt64 {
+        modifierMasks.values.filter { $0.generic == generic }.reduce(0) { $0 | $1.device }
     }
 
-    // MARK: - Modifier Event Handlers
+    /// Whether the key is held according to the flags. Uses the left or
+    /// right device bit when the keyboard reports one, else the generic flag.
+    static func isPressed(keyCode: Int, flags: UInt64) -> Bool {
+        guard let masks = modifierMasks[keyCode] else { return false }
+        if masks.device != 0, flags & familyDeviceMask(masks.generic) != 0 {
+            return flags & masks.device != 0
+        }
+        return flags & masks.generic != 0
+    }
 
-    /// Handles flagsChanged from CGEventTap (primary path).
-    private func handleCGFlagsChanged(_ event: CGEvent) {
-        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        let flags = event.flags
+    /// Handles flagsChanged from the tap and the NSEvent monitors. NSEvent
+    /// modifier flags use the same bits as CGEventFlags.
+    private func handleFlagsChanged(keyCode: Int, flags: UInt64) {
+        guard !isPaused else { return }
+        let hidOwns: Set<Int> = hid.isOpen ? [Shortcut.functionKeyCode, Shortcut.capsLockKeyCode] : []
 
-        // Log ALL modifier events for diagnostics — helps identify wrong
-        // keyCode mappings, remapping software, or non-delivery.
-        diagLog("[Parrot:HotkeyManager] CGEventTap event: keyCode=\(keyCode), flags=0x\(String(flags.rawValue, radix: 16)), binding=\(binding.keyCode)")
+        // A lost release from the HID stream: Fn no longer in the flags.
+        if hid.isOpen, flags & CGEventFlags.maskSecondaryFn.rawValue == 0 {
+            hid.noteReleased(Shortcut.functionKeyCode)
+        }
 
-        let modifierKeyCodes: Set<Int64> = [
-            0x3A, 0x3D, // Left/Right Option
-            0x37, 0x36, // Left/Right Command
-            0x38, 0x3C, // Left/Right Shift
-            0x3B, 0x3E, // Left/Right Control
-        ]
-        guard modifierKeyCodes.contains(keyCode) else { return }
-
-        let target = targetCGFlag
-
-        if flags.contains(target) && keyCode == Int64(binding.keyCode) {
-            if !isKeyDown {
-                isKeyDown = true
-                diagLog("[Parrot:HotkeyManager] Modifier DOWN via CGEventTap (keyCode=\(keyCode))")
-                onKeyDown?()
+        if keyCode == Shortcut.capsLockKeyCode, !hidOwns.contains(keyCode) {
+            // flagsChanged only reports the Caps Lock state flipping, so
+            // each flip is one whole press.
+            let isOn = flags & CGEventFlags.maskAlphaShift.rawValue != 0
+            defer { lastCapsLockOn = isOn }
+            guard lastCapsLockOn != isOn else { return }
+            for (id, binding) in registrations where binding.isModifierOnly && binding.keyCode == keyCode {
+                keyDown(id)
+                keyUp(id)
             }
-        } else if !flags.contains(target) && isKeyDown {
-            isKeyDown = false
-            diagLog("[Parrot:HotkeyManager] Modifier UP via CGEventTap")
-            onKeyUp?()
+            return
         }
-    }
 
-    /// Handles flagsChanged from NSEvent monitors (global + local).
-    private func handleFlagsChanged(_ event: NSEvent) {
-        // Log ALL modifier events for diagnostics.
-        diagLog("[Parrot:HotkeyManager] NSEvent flagsChanged: keyCode=\(event.keyCode), flags=0x\(String(event.modifierFlags.rawValue, radix: 16)), binding=\(binding.keyCode)")
-
-        let modifierKeyCodes: Set<UInt16> = [
-            0x3A, 0x3D, // Left/Right Option
-            0x37, 0x36, // Left/Right Command
-            0x38, 0x3C, // Left/Right Shift
-            0x3B, 0x3E, // Left/Right Control
-        ]
-        guard modifierKeyCodes.contains(event.keyCode) else { return }
-
-        let flags = event.modifierFlags
-        let target = targetNSFlag
-
-        if flags.contains(target) && Int(event.keyCode) == binding.keyCode {
-            if !isKeyDown {
-                isKeyDown = true
-                diagLog("[Parrot:HotkeyManager] Modifier DOWN via NSEvent (keyCode=\(event.keyCode))")
-                onKeyDown?()
+        for (id, binding) in registrations where binding.isModifierOnly && !binding.isMouseButton {
+            guard !hidOwns.contains(binding.keyCode), Self.modifierMasks[binding.keyCode] != nil else { continue }
+            let pressed = Self.isPressed(keyCode: binding.keyCode, flags: flags)
+            if pressed, keyCode == binding.keyCode {
+                keyDown(id)
+            } else if !pressed {
+                keyUp(id)
             }
-        } else if !flags.contains(target) && isKeyDown {
-            isKeyDown = false
-            diagLog("[Parrot:HotkeyManager] Modifier UP via NSEvent")
-            onKeyUp?()
         }
     }
 
-    // MARK: - Mouse Button (via NSEvent monitors)
-
-    private func installMouseListeners() {
-        globalMouseDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: .otherMouseDown) {
-            [weak self] event in
-            self?.handleMouseDown(event)
-        }
-        globalMouseUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: .otherMouseUp) {
-            [weak self] event in
-            self?.handleMouseUp(event)
-        }
-
-        localMouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseDown) {
-            [weak self] event in
-            self?.handleMouseDown(event)
-            return event
-        }
-        localMouseUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseUp) {
-            [weak self] event in
-            self?.handleMouseUp(event)
-            return event
-        }
-
-        let hasGlobal = globalMouseDownMonitor != nil
-        diagLog("[Parrot:HotkeyManager] Mouse listeners installed (global=\(hasGlobal), button=\(binding.mouseButton))")
-    }
-
-    private func handleMouseDown(_ event: NSEvent) {
-        guard event.buttonNumber == binding.mouseButton else { return }
-        if !isKeyDown {
-            isKeyDown = true
-            diagLog("[Parrot:HotkeyManager] Mouse DOWN (button=\(event.buttonNumber))")
-            onKeyDown?()
+    /// A non-modifier key went down: every held lone modifier was part of a
+    /// key combination.
+    private func handleKeyDown(keyCode: Int) {
+        guard !isPaused, !Shortcut.loneModifierKeyCodes.contains(keyCode) else { return }
+        for id in downIDs where registrations[id]?.isModifierOnly == true {
+            onEvent?(id, .interrupted)
         }
     }
 
-    private func handleMouseUp(_ event: NSEvent) {
-        guard event.buttonNumber == binding.mouseButton else { return }
-        if isKeyDown {
-            isKeyDown = false
-            diagLog("[Parrot:HotkeyManager] Mouse UP (button=\(event.buttonNumber))")
-            onKeyUp?()
+    // MARK: - Fn and Caps Lock (HID)
+
+    private func updateHID() {
+        let needed = registrations.values.contains {
+            $0.isModifierOnly && ($0.keyCode == Shortcut.functionKeyCode || $0.keyCode == Shortcut.capsLockKeyCode)
+        }
+        guard needed else {
+            hid.stop()
+            return
+        }
+        guard !hid.isOpen else { return }
+        hid.onKey = { [weak self] keyCode, isDown in
+            self?.handleHIDKey(keyCode: keyCode, isDown: isDown)
+        }
+        hid.start()
+    }
+
+    private func handleHIDKey(keyCode: Int, isDown: Bool) {
+        guard !isPaused else { return }
+        for (id, binding) in registrations where binding.isModifierOnly && binding.keyCode == keyCode {
+            if isDown { keyDown(id) } else { keyUp(id) }
+        }
+        if keyCode == Shortcut.capsLockKeyCode, !isDown,
+           registrations.values.contains(where: { $0.isModifierOnly && $0.keyCode == keyCode }) {
+            HIDKeyMonitor.clearCapsLock()
+        }
+    }
+
+    // MARK: - Mouse Buttons
+
+    private func handleMouse(button: Int, isDown: Bool) {
+        guard !isPaused else { return }
+        for (id, binding) in registrations where binding.isMouseButton && binding.mouseButton == button {
+            if isDown { keyDown(id) } else { keyUp(id) }
         }
     }
 }
@@ -401,5 +430,6 @@ final class HotkeyManager {
 // MARK: - KeyboardShortcuts Name Extension
 
 extension KeyboardShortcuts.Name {
+    /// The single registration older builds used; cleared at start.
     static let toggleRecording = Self("toggleRecording")
 }

@@ -1,165 +1,203 @@
 import AppKit
 import SwiftUI
 
+/// Past recordings grouped by day, newest first, with full-text search,
+/// paging, multi-select, bulk delete and a detail pane. [DATA]
 struct HistoryView: View {
+    /// Shown in the sidebar (see SidebarTab.isAvailable).
+    static let isReady = true
+
     @Environment(AppState.self) private var appState
     @Environment(AppSettings.self) private var appSettings
 
-    @State private var entries: [HistoryEntry] = []
-    @State private var query: String = ""
-    @State private var editingID: Int64?
-    @State private var editText: String = ""
-    @State private var showDeleteAll = false
-
-    private let retentionOptions: [(String, Int)] = [
-        ("7 days", 7), ("30 days", 30), ("90 days", 90), ("1 year", 365), ("Forever", 0),
-    ]
+    @State private var model = HistoryListModel()
+    @State private var playback = AudioPlaybackService()
+    @State private var showSettings = false
+    @State private var confirmBulkDelete = false
+    @State private var copiedSelection = false
 
     var body: some View {
-        @Bindable var settings = appSettings
-
         VStack(spacing: 0) {
-            header(settings: $settings)
+            header
             Divider()
             content
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.windowBackgroundColor))
-        .onAppear(perform: reload)
-        .onChange(of: appState.lastTranscription) { _, _ in reload() }
-        .task(id: query) {
+        .onAppear {
+            model.store = appState.historyStore
+            model.reload()
+        }
+        .onDisappear { playback.stop() }
+        .onChange(of: appState.lastTranscription) { _, _ in model.reload() }
+        .task(id: model.query) {
             // Debounce search input.
             try? await Task.sleep(nanoseconds: 250_000_000)
-            reload()
+            guard !Task.isCancelled else { return }
+            model.reload()
+        }
+        .confirmationDialog(
+            "Are you sure you want to delete \(model.selectionCount) recordings? This action cannot be undone.",
+            isPresented: $confirmBulkDelete
+        ) {
+            Button("Delete \(model.selectionCount)", role: .destructive) {
+                let result = model.deleteSelection()
+                playback.stopIfPlaying(result.ids)
+            }
         }
     }
 
     // MARK: - Header
 
-    private func header(settings: Bindable<AppSettings>) -> some View {
+    private var header: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("History")
                         .font(.title2.weight(.semibold))
-                    Text("Your recent dictations, searchable and on-device")
+                    Text(subtitle)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button {
+                    showSettings.toggle()
+                } label: {
+                    Label("Settings", systemImage: "gearshape")
+                }
+                .popover(isPresented: $showSettings, arrowEdge: .bottom) {
+                    HistorySettingsPanel(onRetentionApplied: { model.reload() })
+                        .environment(appState)
+                        .environment(appSettings)
+                }
             }
 
-            HStack(spacing: 12) {
+            HStack(spacing: 10) {
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("Search", text: $query)
+                    TextField("Search", text: $model.query)
                         .textFieldStyle(.plain)
+                    if !model.query.isEmpty {
+                        Button {
+                            model.query = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color(.controlBackgroundColor)))
-                .frame(maxWidth: 260)
-
-                Toggle("Save history", isOn: settings.historyEnabled)
-                    .toggleStyle(.switch)
-
-                Picker("Keep", selection: settings.historyRetentionDays) {
-                    ForEach(retentionOptions, id: \.1) { Text($0.0).tag($0.1) }
-                }
-                .frame(maxWidth: 160)
+                .frame(maxWidth: 280)
 
                 Spacer()
 
-                Button(role: .destructive) {
-                    showDeleteAll = true
-                } label: {
-                    Label("Delete All", systemImage: "trash")
+                if model.isMultiSelect {
+                    Text(model.isSelectAllMode ? "All \(model.selectionCount) selected" : "\(model.selectionCount) selected")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Button("Select All") { model.selectAllMatching() }
+                        .disabled(model.totalCount == 0)
+                    Button {
+                        copySelection()
+                    } label: {
+                        Label(copiedSelection ? "Copied" : "Copy", systemImage: copiedSelection ? "checkmark" : "doc.on.doc")
+                    }
+                    .disabled(model.selectionCount == 0)
+                    Button(role: .destructive) {
+                        confirmBulkDelete = true
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                    .disabled(model.selectionCount == 0)
+                    Button("Done") { model.isMultiSelect = false }
+                } else {
+                    Button("Select") { model.isMultiSelect = true }
+                        .disabled(model.entries.isEmpty)
                 }
-                .disabled(entries.isEmpty)
             }
         }
         .padding(20)
-        .confirmationDialog("Delete all history?", isPresented: $showDeleteAll) {
-            Button("Delete All", role: .destructive) {
-                try? appState.historyStore?.deleteAll()
-                reload()
-            }
-        } message: {
-            Text("This permanently removes every saved dictation.")
-        }
+    }
+
+    private var subtitle: String {
+        if !appSettings.history.historyEnabled { return "History is off" }
+        let count = model.totalCount
+        if !model.loadedQuery.isEmpty { return "\(count) \(count == 1 ? "match" : "matches")" }
+        return "\(count) \(count == 1 ? "recording" : "recordings"), kept \(RetentionOption.label(forDays: appSettings.history.historyRetentionDays).lowercased())"
     }
 
     // MARK: - Content
 
     @ViewBuilder
     private var content: some View {
-        if !appSettings.historyEnabled {
-            emptyState(
-                icon: "nosign",
-                title: "History is off",
-                message: "Turn on Save history to keep a searchable record of your dictations."
-            )
-        } else if entries.isEmpty {
-            emptyState(
-                icon: query.isEmpty ? "clock" : "magnifyingglass",
-                title: query.isEmpty ? "No dictations yet" : "No matches",
-                message: query.isEmpty ? "Your dictations will appear here." : "Try a different search."
-            )
-        } else {
-            List {
-                ForEach(entries) { entry in
-                    row(entry)
-                }
+        if model.store == nil {
+            emptyState(icon: "exclamationmark.triangle", title: "History is unavailable", message: "The history database could not be opened.")
+        } else if model.entries.isEmpty {
+            if !appSettings.history.historyEnabled && model.loadedQuery.isEmpty {
+                emptyState(icon: "nosign", title: "History is off", message: "Turn on Save history in Settings to keep a searchable record of your dictations.")
+            } else {
+                emptyState(icon: model.loadedQuery.isEmpty ? "clock" : "magnifyingglass", title: "No recordings found.", message: model.loadedQuery.isEmpty ? "Your dictations will appear here." : "Try a different search.")
             }
-            .listStyle(.inset)
+        } else {
+            HSplitView {
+                list
+                    .frame(minWidth: 260, idealWidth: 340)
+                detail
+                    .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
     }
 
-    private func row(_ entry: HistoryEntry) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if editingID == entry.id {
-                TextEditor(text: $editText)
-                    .font(.body)
-                    .frame(minHeight: 60)
+    private var list: some View {
+        List(selection: Binding(get: { model.selectedID }, set: { model.selectedID = $0 })) {
+            ForEach(model.groups) { group in
+                Section(HistoryGrouping.title(for: group.day)) {
+                    ForEach(group.entries) { entry in
+                        HistoryRowView(
+                            entry: entry,
+                            query: model.loadedQuery,
+                            isMultiSelect: model.isMultiSelect,
+                            isChecked: model.isSelectAllMode || model.checked.contains(entry.id),
+                            onToggleChecked: { model.toggleChecked(entry.id) }
+                        )
+                        .tag(entry.id)
+                        .onAppear { model.loadMoreIfNeeded(after: entry) }
+                    }
+                }
+            }
+            if model.hasMore {
                 HStack {
                     Spacer()
-                    Button("Cancel") { editingID = nil }
-                    Button("Save") {
-                        try? appState.historyStore?.updateFinalText(id: entry.id, newText: editText)
-                        editingID = nil
-                        reload()
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-            } else {
-                Text(entry.finalText)
-                    .font(.body)
-                    .lineLimit(3)
-                    .textSelection(.enabled)
-
-                HStack(spacing: 8) {
-                    Text(entry.timestamp, format: .relative(presentation: .named))
-                    if let app = entry.appBundleID { Text(appName(app)) }
-                    if let mode = entry.modeName { Text("· \(mode)") }
+                    ProgressView().controlSize(.small)
                     Spacer()
-                    Button { copy(entry.finalText) } label: { Image(systemName: "doc.on.doc") }
-                        .buttonStyle(.borderless)
-                        .help("Copy")
-                    Button { editingID = entry.id; editText = entry.finalText } label: { Image(systemName: "pencil") }
-                        .buttonStyle(.borderless)
-                        .help("Edit")
-                    Button(role: .destructive) {
-                        try? appState.historyStore?.delete(id: entry.id)
-                        reload()
-                    } label: { Image(systemName: "trash") }
-                        .buttonStyle(.borderless)
-                        .help("Delete")
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .onAppear { model.loadMore() }
             }
         }
-        .padding(.vertical, 4)
+        .listStyle(.inset)
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        if let entry = model.selectedEntry {
+            HistoryDetailView(
+                entry: entry,
+                query: model.loadedQuery,
+                playback: playback,
+                modes: appState.modeManager?.modes ?? [],
+                onCopy: copy,
+                onDelete: {
+                    playback.stopIfPlaying([entry.id])
+                    model.delete(entry)
+                },
+                onReprocess: { mode in await reprocess(entry, with: mode) }
+            )
+            .id(entry.id)
+        } else {
+            emptyState(icon: "text.alignleft", title: "Select a recording", message: "Pick a recording to see its text, play it, or reprocess it.")
+        }
     }
 
     private func emptyState(icon: String, title: String, message: String) -> some View {
@@ -167,7 +205,7 @@ struct HistoryView: View {
             Spacer()
             Image(systemName: icon).font(.system(size: 36)).foregroundStyle(.secondary)
             Text(title).font(.title3.weight(.medium))
-            Text(message).font(.callout).foregroundStyle(.secondary)
+            Text(message).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -175,21 +213,103 @@ struct HistoryView: View {
 
     // MARK: - Actions
 
-    private func reload() {
-        entries = (try? appState.historyStore?.entries(matching: query)) ?? []
-    }
-
     private func copy(_ text: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        let clipboard = appState.services.output.clipboard
+        clipboard.finish(clipboard.write(text, transient: false), restoreAfter: nil)
     }
 
-    private func appName(_ bundleID: String) -> String {
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID),
-           let name = Bundle(url: url)?.object(forInfoDictionaryKey: "CFBundleName") as? String {
-            return name
+    private func copySelection() {
+        copy(HistoryGrouping.copyText(for: model.selectedEntries()))
+        copiedSelection = true
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            copiedSelection = false
         }
-        return bundleID
+    }
+
+    /// Runs the recording through `mode` again. The result goes only to the
+    /// clipboard (reprocess runs never paste and are not saved).
+    private func reprocess(_ entry: HistoryEntry, with mode: Mode) async -> String {
+        guard let session = await appState.controller.reprocess(historyID: entry.id, mode: mode) else {
+            return "Parrot is busy. Try again when the current dictation finishes."
+        }
+        switch session.outcome {
+        case .copiedOnly, .pasted:
+            return "Reprocessed with \(mode.name) and copied to the clipboard:\n\(session.text)"
+        case .empty:
+            return "Nothing came back from reprocessing this recording."
+        case .failed(let message):
+            return "Reprocessing failed: \(message)"
+        default:
+            return "Reprocessing did not finish."
+        }
+    }
+}
+
+// MARK: - Settings Panel
+
+/// Save history, "Keep recordings for" with a delete-count confirmation,
+/// and saving the prompt and context. [DATA]
+struct HistorySettingsPanel: View {
+    let onRetentionApplied: () -> Void
+
+    @Environment(AppState.self) private var appState
+    @Environment(AppSettings.self) private var appSettings
+    @State private var pendingDays: Int?
+    @State private var pendingCount = 0
+
+    var body: some View {
+        @Bindable var history = appSettings.history
+        Form {
+            Toggle("Save history", isOn: $history.historyEnabled)
+            Picker("Keep recordings for", selection: Binding(
+                get: { history.historyRetentionDays },
+                set: { request($0) }
+            )) {
+                ForEach(RetentionOption.choices(including: history.historyRetentionDays), id: \.self) { days in
+                    Text(RetentionOption.label(forDays: days)).tag(days)
+                }
+            }
+            Text("Older recordings are deleted automatically, audio included.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Toggle("Save prompt and context with each recording", isOn: $history.savePromptContext)
+            Text("Stores the prompt sent to the language model and the captured context (such as selected text) in the recording's folder. Off by default.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .formStyle(.grouped)
+        .frame(width: 380)
+        .alert("Delete Recordings", isPresented: Binding(get: { pendingDays != nil }, set: { if !$0 { pendingDays = nil } })) {
+            Button("Delete", role: .destructive) {
+                if let days = pendingDays { apply(days) }
+                pendingDays = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDays = nil }
+        } message: {
+            Text(RetentionOption.confirmationMessage(count: pendingCount))
+        }
+    }
+
+    private func request(_ days: Int) {
+        let current = appSettings.history.historyRetentionDays
+        guard days != current else { return }
+        if RetentionOption.needsConfirmation(from: current, to: days) {
+            let count = (try? appState.historyStore?.countOlderThan(days: days)) ?? 0
+            if count > 0 {
+                pendingCount = count
+                pendingDays = days
+                return
+            }
+        }
+        apply(days)
+    }
+
+    private func apply(_ days: Int) {
+        appSettings.history.historyRetentionDays = days
+        appState.services.recordings.applyRetention()
+        onRetentionApplied()
     }
 }
 
@@ -197,5 +317,5 @@ struct HistoryView: View {
     HistoryView()
         .environment(AppState())
         .environment(AppSettings())
-        .frame(width: 600, height: 500)
+        .frame(width: 800, height: 500)
 }
